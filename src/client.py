@@ -1,27 +1,124 @@
 """O'Reilly API client for fetching book content."""
 
+import posixpath
 import random
 import re
 import time
-from urllib.parse import urljoin
+from collections.abc import Iterator
+from pathlib import PurePosixPath
+from typing import Any
+from urllib.parse import unquote, urlsplit
 
 import httpx
 from bs4 import BeautifulSoup
 from rich.console import Console
-from rich.progress import Progress, SpinnerColumn, TextColumn
+from rich.progress import (
+    BarColumn,
+    MofNCompleteColumn,
+    Progress,
+    SpinnerColumn,
+    TextColumn,
+)
 
 from .cookie_auth import Session
-from .models import Book, BookMetadata, Chapter, Image
+from .models import Asset, Book, BookMetadata, Chapter, TocEntry
 
 console = Console()
 
-API_BASE = "https://learning.oreilly.com/api/v2/"
-CONTENT_BASE = "https://learning.oreilly.com/"
+SITE = "https://learning.oreilly.com/"
+API_BASE = f"{SITE}api/v2/"
+OREILLY_HOSTS = {"learning.oreilly.com", "www.oreilly.com", "oreilly.com"}
+
+# Files of the original EPUB that are not copied as assets: chapters are fetched
+# through the chapters API and the package/NCX files are regenerated on write.
+HTML_TYPES = {"text/html", "application/xhtml+xml"}
+PACKAGE_TYPES = {"application/oebps-package+xml", "application/x-dtbncx+xml"}
 
 
 def human_delay(min_ms: int = 300, max_ms: int = 1500) -> None:
     """Add a random human-like delay between requests."""
     time.sleep(random.randint(min_ms, max_ms) / 1000)
+
+
+def _book_urn(book_id: str) -> str:
+    return f"urn:orm:book:{book_id}"
+
+
+def _item_path(item: dict) -> str:
+    """Path of a chapter/TOC item inside the original EPUB (e.g. "ch01.html")."""
+    reference_id = item.get("reference_id", "")
+    if "-/" in reference_id:
+        return reference_id.split("-/", 1)[1]
+    ourn = item.get("ourn", "")
+    if ":chapter:" in ourn:
+        return ourn.split(":chapter:", 1)[1]
+    return item.get("full_path", "")
+
+
+def _collapse(text: str) -> str:
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _html_to_text(html: str) -> str:
+    """Flatten the catalogue's HTML description into plain paragraphs."""
+    if not html:
+        return ""
+    soup = BeautifulSoup(html, "lxml")
+    blocks = soup.find_all(["p", "li"])
+    paragraphs = [_collapse(b.get_text(" ")) for b in blocks] or [_collapse(soup.get_text(" "))]
+    return "\n\n".join(p for p in paragraphs if p)
+
+
+def _localize_css(css: str) -> str:
+    """Undo the web reader's rewrite of the publisher stylesheet.
+
+    The reader scopes every rule under `#sbo-rt-content` and replaces `body`
+    with `div` (which also mangles `tbody`); it drops the `@font-face` rules,
+    which are regenerated in `_font_faces`.
+    """
+    css = re.sub(r"#sbo-rt-content(?=\s*[{,])", "body", css)
+    css = re.sub(r"#sbo-rt-content\s*>?\s*", "", css)
+    return re.sub(r"(?<![\w.#-])tdiv(?![\w-])", "tbody", css)
+
+
+# Family names O'Reilly's stylesheet uses for the fonts it ships.
+FONT_FAMILIES = {
+    "UbuntuMono-Regular": ("Ubuntu Mono", "normal", "normal"),
+    "UbuntuMono-Bold": ("Ubuntu Mono Bold", "bold", "normal"),
+    "UbuntuMono-Italic": ("Ubuntu Mono Ital", "normal", "italic"),
+    "UbuntuMono-BoldItalic": ("Ubuntu Mono BoldItal", "bold", "italic"),
+    "DejaVuSerif": ("DejaVu Serif", "normal", "normal"),
+    "DejaVuSans-Bold": ("DejaVu Sans", "bold", "normal"),
+}
+FONT_EXTENSIONS = (".otf", ".ttf", ".woff", ".woff2")
+
+
+def _is_font(asset: Asset) -> bool:
+    return asset.media_type.startswith("font/") or asset.path.lower().endswith(FONT_EXTENSIONS)
+
+
+def _font_faces(fonts: list[Asset], css_path: str) -> str:
+    """`@font-face` rules for the shipped fonts, relative to the stylesheet."""
+    rules = []
+    for font in fonts:
+        stem = PurePosixPath(font.path).stem
+        family, weight, style = FONT_FAMILIES.get(stem) or (
+            re.sub(r"[-_]", " ", stem),
+            "bold" if "bold" in stem.lower() else "normal",
+            "italic" if re.search(r"ital|oblique", stem, re.I) else "normal",
+        )
+        url = posixpath.relpath(font.path, posixpath.dirname(css_path) or ".")
+        rules.append(
+            f'@font-face{{font-family:"{family}";font-weight:{weight};'
+            f"font-style:{style};src:url({url})}}"
+        )
+    return "\n" + "\n".join(rules) + "\n"
+
+
+def _walk(entries: list[TocEntry]) -> Iterator[TocEntry]:
+    for entry in entries:
+        yield entry
+        yield from _walk(entry.children)
 
 
 class OreillyClient:
@@ -39,371 +136,411 @@ class OreillyClient:
                 "Accept": "application/json, text/html, */*",
                 "Accept-Language": "en-US,en;q=0.9",
                 "Cookie": session.get_cookie_header(),
-                "Referer": "https://learning.oreilly.com/",
+                "Referer": SITE,
             },
             follow_redirects=True,
             timeout=30.0,
         )
 
     def get_book(self, book_id: str) -> Book:
-        """Fetch complete book with metadata and chapters.
+        """Fetch a complete book: metadata, nested TOC, chapters and assets."""
+        console.print(f"[bold]Fetching book:[/] {book_id}")
 
-        Args:
-            book_id: The O'Reilly book ID (from URL)
-
-        Returns:
-            Complete Book object with metadata and chapter content
-        """
-        console.print(f"[bold]Fetching book: {book_id}[/]")
-
-        # Get book metadata
         metadata = self._get_metadata(book_id)
         console.print(f"[green]Found:[/] {metadata}")
 
-        # Get table of contents / chapters
         chapters = self._get_chapters(book_id)
-        console.print(f"[green]Found {len(chapters)} chapters[/]")
+        toc = self._get_toc(book_id, chapters)
+        console.print(
+            f"[green]Found[/] {len(chapters)} documents, "
+            f"{sum(1 for _ in _walk(toc))} table-of-contents entries"
+        )
 
-        # Fetch chapter content
-        self._fetch_chapter_content(chapters)
+        assets = self._fetch_assets(book_id, chapters)
+        console.print(f"[green]Downloaded[/] {len(assets)} assets")
 
-        # Collect and download images from all chapters
-        images = self._fetch_images(chapters)
-        console.print(f"[green]Downloaded {len(images)} images[/]")
+        missing = self._fetch_chapters(book_id, chapters, assets)
+        if missing:
+            self._fetch_missing_assets(book_id, missing, assets)
+        self._read_front_matter(metadata, chapters)
+        cover = self._pick_cover(chapters, assets, metadata)
 
-        # Fetch cover image
-        cover_image = self._fetch_cover(metadata.cover_url)
+        return Book(metadata=metadata, chapters=chapters, assets=assets, toc=toc, cover=cover)
 
-        return Book(metadata=metadata, chapters=chapters, cover_image=cover_image, images=images)
+    # ------------------------------------------------------------------ HTTP
+
+    def _get_json(self, url: str, params: dict | None = None) -> Any:
+        response = self.http.get(url, params=params)
+        response.raise_for_status()
+        return response.json()
+
+    def _paginate(self, url: str, params: dict | None = None) -> Iterator[dict]:
+        """Yield the results of a paginated API listing."""
+        while url:
+            data = self._get_json(url, params=params)
+            params = None
+            if isinstance(data, list):
+                yield from data
+                return
+            yield from data.get("results", [])
+            url = data.get("next")
+            if url:
+                human_delay(200, 500)
+
+    @staticmethod
+    def _progress() -> Progress:
+        return Progress(
+            SpinnerColumn(),
+            TextColumn("{task.description}"),
+            BarColumn(),
+            MofNCompleteColumn(),
+            console=console,
+            transient=True,
+        )
+
+    # -------------------------------------------------------------- metadata
 
     def _get_metadata(self, book_id: str) -> BookMetadata:
-        """Fetch book metadata from API."""
-        url = f"{API_BASE}epubs/urn:orm:book:{book_id}/"
-        response = self.http.get(url)
-
+        """Combine the EPUB record with the catalogue entry (authors, publisher, topics)."""
+        response = self.http.get(f"{API_BASE}epubs/{_book_urn(book_id)}/")
         if response.status_code == 404:
             raise ValueError(f"Book not found: {book_id}")
         response.raise_for_status()
+        info = response.json()
 
-        data = response.json()
+        catalog = self._get_catalog_entry(book_id)
+        authors = list(catalog.get("authors") or [])
+        publisher = next(iter(catalog.get("publishers") or []), "")
+        if not authors or not publisher:
+            page_authors, page_publisher = self._scrape_book_page(book_id)
+            authors = authors or page_authors
+            publisher = publisher or page_publisher
 
-        # Extract authors
-        authors = [a.get("name", "") for a in data.get("authors", [])]
-        if not authors:
-            authors = [data.get("author", "Unknown")]
-
-        # Extract cover URL
-        cover_url = data.get("cover", "") or data.get("cover_url", "")
+        description = catalog.get("description") or info.get("descriptions", {}).get(
+            "text/html", ""
+        )
+        published = info.get("publication_date") or catalog.get("issued") or ""
 
         return BookMetadata(
             id=book_id,
-            title=data.get("title", "Unknown Title"),
+            title=_collapse(info.get("title") or catalog.get("title") or f"Book {book_id}"),
             authors=authors,
-            publisher=data.get("publishers", [{}])[0].get("name", "")
-            if data.get("publishers")
-            else data.get("publisher", ""),
-            description=data.get("description", ""),
-            cover_url=cover_url,
-            isbn=data.get("isbn", ""),
-            language=data.get("language", "en"),
+            publisher=publisher,
+            description=_html_to_text(description),
+            isbn=info.get("isbn") or catalog.get("isbn") or "",
+            language=info.get("language") or catalog.get("language") or "en",
+            published=published[:10],
+            subjects=[t["name"] for t in catalog.get("topics_payload", []) if t.get("name")],
+            cover_url=catalog.get("cover_url", ""),
         )
 
-    def _get_chapters(self, book_id: str) -> list[Chapter]:
-        """Fetch table of contents from the API."""
-        console.print(f"[dim]Fetching table of contents...[/]")
+    def _get_catalog_entry(self, book_id: str) -> dict:
+        """Search result for the book; it carries what the EPUB record lacks."""
+        try:
+            data = self._get_json(f"{API_BASE}search/", params={"query": book_id, "limit": 5})
+        except (httpx.HTTPError, ValueError):
+            return {}
+        for result in data.get("results", []):
+            if result.get("archive_id") == book_id:
+                return result
+        return {}
 
-        # Use the chapters API endpoint
-        chapters_url = f"{API_BASE}epub-chapters/?epub_identifier=urn:orm:book:{book_id}"
-        all_results = []
-
-        while chapters_url:
-            human_delay(500, 1000)
-
-            response = self.http.get(chapters_url)
-            if response.status_code != 200:
-                console.print(f"[yellow]Chapters API returned {response.status_code}, trying fallback...[/]")
-                return self._get_chapters_fallback(book_id)
-
-            data = response.json()
-            results = data.get("results", data) if isinstance(data, dict) else data
-            all_results.extend(results)
-
-            # Follow data.get("next") to get the next chapter
-            chapters_url = data.get("next") if isinstance(data, dict) else None
-
-        chapters = []
-        for i, item in enumerate(all_results):
-            title = item.get("title", f"Chapter {i + 1}")
-            content_url = item.get("content_url", "")
-            chapter_id = item.get("ourn", "").split(":")[-1].replace(".html", "") or f"ch{i}"
-
-            # Skip cover and other front matter that we don't need
-            # (we'll handle cover separately)
-
-            chapters.append(
-                Chapter(
-                    id=chapter_id,
-                    title=title,
-                    url=item.get("url", ""),
-                    content_url=content_url,
-                    order=i,
-                )
-            )
-
-        return chapters
-
-    def _get_chapters_fallback(self, book_id: str) -> list[Chapter]:
-        """Fallback: scrape chapter list from the book page."""
-        book_page_url = f"{CONTENT_BASE}library/view/-/{book_id}/"
-
-        human_delay(500, 1000)
-        response = self.http.get(book_page_url)
-        response.raise_for_status()
-
+    def _scrape_book_page(self, book_id: str) -> tuple[list[str], str]:
+        """Fallback: authors and publisher from the book page's Open Graph tags."""
+        try:
+            response = self.http.get(f"{SITE}library/view/-/{book_id}/")
+            response.raise_for_status()
+        except httpx.HTTPError:
+            return [], ""
         soup = BeautifulSoup(response.text, "lxml")
-        chapters = []
+        authors = [
+            m["content"] for m in soup.find_all("meta", property="og:book:author") if m.get("content")
+        ]
+        publisher_tag = soup.find("meta", attrs={"name": "publisher"})
+        publisher = publisher_tag["content"] if publisher_tag and publisher_tag.get("content") else ""
+        return authors, publisher
 
-        # Find chapter links in the TOC section
-        chapter_links = soup.select('a[href*="/library/view/"][href$=".html"]')
-
-        seen_urls = set()
-        for link in chapter_links:
-            href = link.get("href", "")
-            if not href or href in seen_urls:
+    def _read_front_matter(self, metadata: BookMetadata, chapters: list[Chapter]) -> None:
+        """Fill subtitle, rights and publisher from the title and copyright pages."""
+        for chapter in chapters[:6]:
+            if not chapter.html:
                 continue
+            soup = BeautifulSoup(chapter.html, "lxml")
+            if not metadata.subtitle and (tag := soup.select_one("p.subtitle")):
+                metadata.subtitle = _collapse(tag.get_text(" "))
+            if not metadata.rights and (tag := soup.select_one("p.copyright")):
+                metadata.rights = _collapse(tag.get_text(" "))
+            if not metadata.publisher and (tag := soup.select_one("span.publishername")):
+                metadata.publisher = _collapse(tag.get_text(" "))
+            if not metadata.authors and (tag := soup.select_one("p.author")):
+                byline = re.sub(r"^by\s+", "", _collapse(tag.get_text(" ")), flags=re.I)
+                metadata.authors = [a for a in re.split(r",\s*|\s+and\s+", byline) if a]
 
-            if book_id not in href:
+    # --------------------------------------------------------------- content
+
+    def _get_chapters(self, book_id: str) -> list[Chapter]:
+        """Reading-order list of content documents."""
+        console.print("[dim]Fetching table of contents...[/]")
+        items = self._paginate(
+            f"{API_BASE}epub-chapters/",
+            params={"epub_identifier": _book_urn(book_id), "limit": 100},
+        )
+
+        chapters: list[Chapter] = []
+        for item in items:
+            path = _item_path(item)
+            if not path or not item.get("content_url"):
                 continue
-
-            seen_urls.add(href)
-
-            title = link.get_text(strip=True) or f"Chapter {len(chapters) + 1}"
-            content_url = urljoin(CONTENT_BASE, href)
-            chapter_id = href.split("/")[-1].replace(".html", "")
-
+            title = _collapse(item.get("title") or "") or PurePosixPath(path).stem
             chapters.append(
                 Chapter(
-                    id=chapter_id,
+                    path=path,
                     title=title,
-                    url=href,
-                    content_url=content_url,
+                    content_url=item["content_url"],
                     order=len(chapters),
                 )
             )
 
+        if not chapters:
+            raise ValueError(
+                f"No chapters found for {book_id}. "
+                "Your cookies may have expired or the book is not in your subscription."
+            )
         return chapters
 
-    def _fetch_chapter_content(self, chapters: list[Chapter]) -> None:
-        """Fetch HTML content for all chapters with human-like pacing."""
-        with Progress(
-            SpinnerColumn(),
-            TextColumn("[progress.description]{task.description}"),
-            console=console,
-        ) as progress:
-            task = progress.add_task("Downloading chapters...", total=len(chapters))
+    def _get_toc(self, book_id: str, chapters: list[Chapter]) -> list[TocEntry]:
+        """Nested table of contents; falls back to one entry per document."""
+        try:
+            data = self._get_json(f"{API_BASE}epubs/{_book_urn(book_id)}/table-of-contents/")
+        except (httpx.HTTPError, ValueError):
+            data = []
+        nodes = data if isinstance(data, list) else data.get("results", [])
 
-            for i, chapter in enumerate(chapters):
-                progress.update(task, description=f"Downloading: {chapter.title[:40]}")
+        def build(node: dict) -> TocEntry:
+            return TocEntry(
+                title=_collapse(node.get("title") or ""),
+                path=_item_path(node),
+                fragment=node.get("fragment") or "",
+                children=[build(child) for child in node.get("children", [])],
+            )
 
-                if not chapter.content_url:
+        known = {c.path for c in chapters}
+        entries = [build(n) for n in nodes]
+        entries = [e for e in entries if e.path in known and e.title]
+        if not entries:
+            entries = [TocEntry(title=c.title, path=c.path) for c in chapters]
+        return entries
+
+    def _fetch_assets(self, book_id: str, chapters: list[Chapter]) -> list[Asset]:
+        """Download every non-HTML file of the book (images, CSS, fonts) at its original path."""
+        files = self._paginate(
+            f"{API_BASE}epubs/{_book_urn(book_id)}/files/", params={"limit": 500}
+        )
+        chapter_paths = {c.path for c in chapters}
+        wanted: dict[str, dict] = {}
+        for file in files:
+            path = file.get("full_path")
+            if (
+                path
+                and path not in chapter_paths
+                and path not in wanted
+                and file.get("media_type") not in HTML_TYPES | PACKAGE_TYPES
+            ):
+                wanted[path] = file
+        wanted = list(wanted.values())
+
+        assets: list[Asset] = []
+        with self._progress() as progress:
+            task = progress.add_task("Assets", total=len(wanted))
+            for file in wanted:
+                name = file.get("filename") or file["full_path"]
+                progress.update(task, description=f"Assets: {name[:40]}")
+                human_delay(100, 300)
+                try:
+                    response = self.http.get(file["url"])
+                    response.raise_for_status()
+                except httpx.HTTPError as e:
+                    console.print(f"[yellow]Warning: failed to fetch {name}: {e}[/]")
                     progress.advance(task)
                     continue
 
-                # Add human-like delay between chapter requests
-                # Vary delay more for early chapters, settle into rhythm
-                if i < 3:
-                    human_delay(1000, 2500)
-                else:
-                    human_delay(500, 1500)
+                media_type = file.get("media_type") or response.headers.get(
+                    "content-type", "application/octet-stream"
+                ).split(";")[0]
+                data = response.content
+                if media_type == "text/css":
+                    data = _localize_css(response.text).encode("utf-8")
+
+                assets.append(Asset(path=file["full_path"], media_type=media_type, data=data))
+                progress.advance(task)
+
+        fonts = [a for a in assets if _is_font(a)]
+        for stylesheet in (a for a in assets if a.media_type == "text/css"):
+            if fonts and b"@font-face" not in stylesheet.data:
+                stylesheet.data += _font_faces(fonts, stylesheet.path).encode("utf-8")
+        return assets
+
+    def _fetch_chapters(
+        self, book_id: str, chapters: list[Chapter], assets: list[Asset]
+    ) -> set[str]:
+        """Fetch and clean the HTML of every document with human-like pacing.
+
+        Returns the in-book file paths referenced by the chapters that are not
+        among the downloaded assets (the file listing occasionally omits some).
+        """
+        chapter_paths = {c.path for c in chapters}
+        asset_paths = {a.path for a in assets}
+        missing: set[str] = set()
+
+        with self._progress() as progress:
+            task = progress.add_task("Chapters", total=len(chapters))
+            for i, chapter in enumerate(chapters):
+                progress.update(task, description=f"Chapters: {chapter.title[:40]}")
+                # Vary the delay more for early chapters, then settle into a rhythm.
+                human_delay(1000, 2500) if i < 3 else human_delay(500, 1500)
 
                 try:
                     response = self.http.get(chapter.content_url)
                     response.raise_for_status()
-
-                    # Check if response is JSON (API) or HTML (direct content)
-                    content_type = response.headers.get("content-type", "")
-
-                    if "json" in content_type:
-                        data = response.json()
-                        chapter.html_content = data.get("content", "")
-                    else:
-                        chapter.html_content = response.text
-
-                    # Clean up the HTML content
-                    chapter.html_content = self._clean_html(chapter.html_content)
-
                 except httpx.HTTPError as e:
-                    console.print(
-                        f"[yellow]Warning: Failed to fetch {chapter.title}: {e}[/]"
-                    )
-                    # On error, wait a bit longer before next request
+                    console.print(f"[yellow]Warning: failed to fetch {chapter.title}: {e}[/]")
                     human_delay(2000, 4000)
+                    progress.advance(task)
+                    continue
 
+                if "json" in response.headers.get("content-type", ""):
+                    html = response.json().get("content", "")
+                else:
+                    html = response.text
+                chapter.html = self._clean_html(
+                    html, chapter, chapter_paths, asset_paths, book_id, missing
+                )
                 progress.advance(task)
+        return missing
 
-    def _fetch_images(self, chapters: list[Chapter]) -> dict[str, Image]:
-        """Extract and download all images from chapters."""
-        # First, collect all unique image URLs
-        image_urls: set[str] = set()
-
-        for chapter in chapters:
-            if not chapter.html_content:
+    def _fetch_missing_assets(self, book_id: str, paths: set[str], assets: list[Asset]) -> None:
+        """Download files the chapters reference but the listing did not include."""
+        for path in sorted(paths):
+            human_delay(100, 300)
+            try:
+                response = self.http.get(f"{API_BASE}epubs/{_book_urn(book_id)}/files/{path}")
+                response.raise_for_status()
+            except httpx.HTTPError as e:
+                console.print(f"[yellow]Warning: failed to fetch {path}: {e}[/]")
                 continue
+            media_type = response.headers.get("content-type", "application/octet-stream")
+            assets.append(Asset(path=path, media_type=media_type.split(";")[0], data=response.content))
+        console.print(f"[green]Recovered[/] {len(paths)} assets missing from the file listing")
 
-            soup = BeautifulSoup(chapter.html_content, "lxml")
-            for img in soup.find_all("img"):
-                src = img.get("src", "")
-                if src and not src.startswith("data:"):
-                    # Make absolute URL
-                    if not src.startswith("http"):
-                        src = urljoin(CONTENT_BASE, src)
-                    image_urls.add(src)
-
-        if not image_urls:
-            return {}
-
-        # Download images
-        images: dict[str, Image] = {}
-
-        with Progress(
-            SpinnerColumn(),
-            TextColumn("[progress.description]{task.description}"),
-            console=console,
-        ) as progress:
-            task = progress.add_task("Downloading images...", total=len(image_urls))
-
-            for url in image_urls:
-                progress.update(task, description=f"Image: {url.split('/')[-1][:30]}")
-
-                try:
-                    human_delay(100, 300)  # Shorter delay for images
-                    response = self.http.get(url)
-                    response.raise_for_status()
-
-                    # Generate filename from URL
-                    filename = url.split("/")[-1]
-                    # Ensure it has an extension
-                    if "." not in filename:
-                        filename = f"{filename}.png"
-
-                    # Determine media type
-                    content_type = response.headers.get("content-type", "image/png")
-                    if "jpeg" in content_type or "jpg" in content_type:
-                        media_type = "image/jpeg"
-                    elif "gif" in content_type:
-                        media_type = "image/gif"
-                    elif "svg" in content_type:
-                        media_type = "image/svg+xml"
-                    elif "webp" in content_type:
-                        media_type = "image/webp"
-                    else:
-                        media_type = "image/png"
-
-                    images[url] = Image(
-                        url=url,
-                        filename=f"images/{filename}",
-                        data=response.content,
-                        media_type=media_type,
-                    )
-
-                except httpx.HTTPError as e:
-                    console.print(f"[yellow]Warning: Failed to fetch image {url}: {e}[/]")
-
-                progress.advance(task)
-
-        # Now update chapter HTML to use local image paths
-        for chapter in chapters:
-            if chapter.html_content:
-                chapter.html_content = self._rewrite_image_urls(chapter.html_content, images)
-
-        return images
-
-    def _rewrite_image_urls(self, html: str, images: dict[str, Image]) -> str:
-        """Rewrite image URLs in HTML to use local EPUB paths."""
-        soup = BeautifulSoup(html, "lxml")
-
-        for img in soup.find_all("img"):
-            src = img.get("src", "")
-            if not src or src.startswith("data:"):
-                continue
-
-            # Make absolute URL for lookup
-            abs_url = src if src.startswith("http") else urljoin(CONTENT_BASE, src)
-
-            if abs_url in images:
-                img["src"] = images[abs_url].filename
-
-        # Return the modified HTML
-        body = soup.find("body")
-        if body:
-            return "".join(str(child) for child in body.children)
-
-        return str(soup)
-
-    def _clean_html(self, html: str) -> str:
-        """Clean and normalize HTML content."""
+    def _clean_html(
+        self,
+        html: str,
+        chapter: Chapter,
+        chapter_paths: set[str],
+        asset_paths: set[str],
+        book_id: str,
+        missing: set[str] | None = None,
+    ) -> str:
+        """Unwrap the reader container and point every reference at the local files."""
         if not html:
             return ""
-
         soup = BeautifulSoup(html, "lxml")
+        root = soup.find(id="sbo-rt-content") or soup.body or soup
 
-        # The API returns content wrapped in <div id="sbo-rt-content">
-        # Extract that if present
-        content_div = soup.find("div", id="sbo-rt-content")
-        if content_div:
-            soup = BeautifulSoup(str(content_div), "lxml")
-
-        # Remove script and style tags
-        for tag in soup.find_all(["script", "style", "nav", "header", "footer", "meta"]):
+        for tag in root.find_all("script"):
             tag.decompose()
+        for tag in root.find_all(attrs={"contenteditable": True}):
+            del tag["contenteditable"]
+        # The reader adds pixel dimensions the publisher's EPUB does not carry;
+        # combined with the stylesheet's max-width they distort figures.
+        for tag in root.find_all("img"):
+            del tag["width"], tag["height"]
 
-        # Remove O'Reilly specific elements and index terms
-        for selector in [
-            ".reader-nav",
-            "[data-orm]",
-            "[data-type='indexterm']",
-            "a[data-type='indexterm']",
-        ]:
+        chapter_dir = posixpath.dirname(chapter.path)
+        for tag in root.find_all(True):
+            for attr in ("src", "href", "poster", "xlink:href", "data"):
+                if tag.has_attr(attr) and isinstance(tag[attr], str):
+                    tag[attr] = self._localize_ref(
+                        tag[attr], chapter_dir, chapter_paths, asset_paths, book_id, missing
+                    )
+
+        return "".join(str(child) for child in root.children)
+
+    @staticmethod
+    def _localize_ref(
+        ref: str,
+        chapter_dir: str,
+        chapter_paths: set[str],
+        asset_paths: set[str],
+        book_id: str,
+        missing: set[str] | None = None,
+    ) -> str:
+        """Map an O'Reilly URL or in-book path to a relative path inside the EPUB.
+
+        Returns the reference unchanged when it points outside the book. In-book
+        files that are not among the assets are recorded in `missing`.
+        """
+        if not ref or ref.startswith(("#", "mailto:", "data:", "javascript:", "tel:")):
+            return ref
+        parts = urlsplit(ref)
+        if parts.scheme and parts.netloc not in OREILLY_HOSTS:
+            return ref
+
+        path = unquote(parts.path)
+        files_prefix = f"/api/v2/epubs/{_book_urn(book_id)}/files/"
+        view_match = re.match(rf"^/library/view/[^/]+/{re.escape(book_id)}/(.+)$", path)
+        in_book = True
+        if path.startswith(files_prefix):
+            target = path[len(files_prefix):]
+        elif view_match:
+            target = view_match.group(1)
+        elif parts.netloc or path.startswith("/") or not path:
+            return ref
+        else:
+            target = posixpath.normpath(posixpath.join(chapter_dir, path))
+            in_book = False
+
+        if target in chapter_paths:
+            target = str(PurePosixPath(target).with_suffix(".xhtml"))
+        elif target not in asset_paths:
+            if not in_book or missing is None or target.endswith(".html"):
+                return ref
+            missing.add(target)
+
+        local = posixpath.relpath(target, chapter_dir or ".")
+        return f"{local}#{parts.fragment}" if parts.fragment else local
+
+    def _pick_cover(
+        self, chapters: list[Chapter], assets: list[Asset], metadata: BookMetadata
+    ) -> Asset | None:
+        """The cover page's image is the full-resolution cover; the catalogue one is a thumbnail."""
+        for chapter in chapters[:5]:
+            is_cover = "cover" in PurePosixPath(chapter.path).stem.lower() or (
+                'data-type="cover"' in chapter.html
+            )
+            if not is_cover or not chapter.html:
+                continue
+            img = BeautifulSoup(chapter.html, "lxml").find("img")
+            if not img or not img.get("src"):
+                continue
+            src = img["src"].split("#")[0]
+            target = posixpath.normpath(posixpath.join(posixpath.dirname(chapter.path), src))
+            for asset in assets:
+                if asset.path == target and asset.media_type.startswith("image/"):
+                    return asset
+
+        if metadata.cover_url:
             try:
-                for tag in soup.select(selector):
-                    tag.decompose()
-            except Exception:
-                pass
+                response = self.http.get(metadata.cover_url)
+                response.raise_for_status()
+            except httpx.HTTPError as e:
+                console.print(f"[yellow]Warning: failed to fetch cover: {e}[/]")
+                return None
+            media_type = response.headers.get("content-type", "image/jpeg").split(";")[0]
+            ext = {"image/png": "png", "image/gif": "gif", "image/webp": "webp"}.get(media_type, "jpg")
+            return Asset(path=f"images/cover.{ext}", media_type=media_type, data=response.content)
 
-        # Make image URLs absolute (will be rewritten later after download)
-        for img in soup.find_all("img"):
-            src = img.get("src", "")
-            if src and not src.startswith(("http", "data:")):
-                img["src"] = urljoin(CONTENT_BASE, src)
-
-        # Get inner content - either from body, the content div, or the whole thing
-        body = soup.find("body")
-        if body:
-            return "".join(str(child) for child in body.children)
-
-        # Return inner HTML without outer wrapper
-        content_div = soup.find("div", id="sbo-rt-content")
-        if content_div:
-            return "".join(str(child) for child in content_div.children)
-
-        return str(soup)
-
-    def _fetch_cover(self, cover_url: str) -> bytes:
-        """Fetch cover image."""
-        if not cover_url:
-            return b""
-
-        try:
-            # Make URL absolute if needed
-            if not cover_url.startswith("http"):
-                cover_url = urljoin(CONTENT_BASE, cover_url)
-
-            response = self.http.get(cover_url)
-            response.raise_for_status()
-            return response.content
-        except httpx.HTTPError as e:
-            console.print(f"[yellow]Warning: Failed to fetch cover: {e}[/]")
-            return b""
+        return None
 
     def close(self) -> None:
         """Close the HTTP client."""

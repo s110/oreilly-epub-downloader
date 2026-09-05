@@ -1,12 +1,14 @@
 """EPUB generation from O'Reilly book content."""
 
+import itertools
+import posixpath
 import re
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from ebooklib import epub
 from rich.console import Console
 
-from .models import Book, Chapter, Image
+from .models import Book, Chapter, TocEntry
 
 console = Console()
 
@@ -15,265 +17,234 @@ def create_epub(book: Book, output_path: Path) -> Path:
     """Create an EPUB file from book content.
 
     Args:
-        book: Complete book with metadata and chapters
+        book: Complete book with metadata, chapters and assets
         output_path: Path to save the EPUB file
 
     Returns:
         Path to the created EPUB file
     """
-    console.print(f"[bold]Creating EPUB: {book.metadata.title}[/]")
+    console.print(f"[bold]Creating EPUB:[/] {book.metadata.title}")
 
-    # Create EPUB book
     epub_book = epub.EpubBook()
+    _add_metadata(epub_book, book)
 
-    # Set metadata
-    epub_book.set_identifier(f"oreilly-{book.metadata.id}")
-    epub_book.set_title(book.metadata.title)
-    epub_book.set_language(book.metadata.language)
+    if book.cover:
+        epub_book.set_cover(book.cover.path, book.cover.data, create_page=False)
 
-    for author in book.metadata.authors:
-        epub_book.add_author(author)
-
-    if book.metadata.publisher:
-        epub_book.add_metadata("DC", "publisher", book.metadata.publisher)
-
-    if book.metadata.description:
-        epub_book.add_metadata("DC", "description", book.metadata.description)
-
-    if book.metadata.isbn:
-        epub_book.add_metadata("DC", "identifier", book.metadata.isbn, {"id": "isbn"})
-
-    # Add cover image if available
-    if book.cover_image:
-        cover_ext = _guess_image_extension(book.cover_image)
-        cover_filename = f"cover.{cover_ext}"
-        epub_book.set_cover(cover_filename, book.cover_image)
-        console.print("[dim]Added cover image[/]")
-
-    # Add CSS
-    css_content = _get_default_css()
-    css_item = epub.EpubItem(
-        uid="style",
-        file_name="style/main.css",
-        media_type="text/css",
-        content=css_content.encode("utf-8"),
-    )
-    epub_book.add_item(css_item)
-
-    # Add images
-    if book.images:
-        for url, image in book.images.items():
-            if image.data:
-                img_item = epub.EpubItem(
-                    uid=f"img_{image.filename.replace('/', '_').replace('.', '_')}",
-                    file_name=image.filename,
-                    media_type=image.media_type,
-                    content=image.data,
-                )
-                epub_book.add_item(img_item)
-        console.print(f"[dim]Added {len(book.images)} images[/]")
-
-    # Create chapters
-    epub_chapters = []
-    for chapter in book.chapters:
-        if not chapter.html_content or not chapter.html_content.strip():
-            console.print(f"[dim]Skipping empty chapter: {chapter.title}[/]")
-            continue
-
-        # Ensure chapter has actual body content
-        if len(chapter.html_content.strip()) < 50:
-            console.print(f"[dim]Skipping near-empty chapter: {chapter.title}[/]")
-            continue
-
-        epub_chapter = _create_chapter(chapter, css_item)
-        epub_book.add_item(epub_chapter)
-        epub_chapters.append(epub_chapter)
-
-    if not epub_chapters:
+    stylesheets = _add_assets(epub_book, book)
+    documents = _add_chapters(epub_book, book, stylesheets)
+    if not documents:
         raise RuntimeError(
             "No chapters with content were found. "
             "This usually means authentication failed or book access is restricted."
         )
 
-    console.print(f"[dim]Added {len(epub_chapters)} chapters[/]")
+    epub_book.toc = _build_toc(book.toc, documents, book.chapters)
+    epub_book.spine = list(documents.values())
 
-    # Create table of contents
-    epub_book.toc = epub_chapters
+    cover_page = next((c for c in book.chapters if c.path in documents and _is_cover_page(c)), None)
+    if cover_page:
+        epub_book.guide.append({"type": "cover", "href": cover_page.filename, "title": "Cover"})
+    body_pages = [c for c in book.chapters if c.path in documents and c is not cover_page]
+    start_page = next(
+        (c for c in body_pages if "titlepage" in PurePosixPath(c.path).stem.lower()),
+        body_pages[0] if body_pages else None,
+    )
+    if start_page:
+        epub_book.guide.append(
+            {"type": "text", "href": start_page.filename, "title": "Start of Text"}
+        )
 
-    # Add navigation files
     epub_book.add_item(epub.EpubNcx())
     epub_book.add_item(epub.EpubNav())
 
-    # Create spine (reading order)
-    epub_book.spine = ["nav"] + epub_chapters
-
-    # Ensure output directory exists
     output_path.parent.mkdir(parents=True, exist_ok=True)
-
-    # Write EPUB file
-    epub.write_epub(str(output_path), epub_book)
-    console.print(f"[bold green]EPUB saved to: {output_path}[/]")
-
+    epub.write_epub(str(output_path), epub_book, {"epub3_pages": False})
     return output_path
 
 
-def _create_chapter(chapter: Chapter, css_item: epub.EpubItem) -> epub.EpubHtml:
-    """Create an EPUB chapter from chapter content."""
-    # Generate a safe filename
-    safe_title = re.sub(r"[^\w\s-]", "", chapter.title)
-    safe_title = re.sub(r"\s+", "_", safe_title)[:50]
-    filename = f"ch{chapter.order:03d}_{safe_title}.xhtml"
+def _add_metadata(epub_book: epub.EpubBook, book: Book) -> None:
+    m = book.metadata
 
-    # Extract just the body content, stripping outer tags
-    body_content = _extract_body_content(chapter.html_content)
+    epub_book.set_identifier(f"urn:isbn:{m.isbn}" if m.isbn else f"urn:orm:book:{m.id}")
+    if m.isbn:
+        epub_book.add_metadata("DC", "identifier", f"urn:orm:book:{m.id}", {"id": "oreilly-id"})
 
-    # Wrap content in proper XHTML structure
-    content = _wrap_html_content(chapter.title, body_content)
+    epub_book.title = m.title
+    epub_book.add_metadata("DC", "title", m.title, {"id": "title"})
+    epub_book.add_metadata(None, "meta", "main", {"refines": "#title", "property": "title-type"})
+    if m.subtitle:
+        epub_book.add_metadata("DC", "title", m.subtitle, {"id": "subtitle"})
+        epub_book.add_metadata(
+            None, "meta", "subtitle", {"refines": "#subtitle", "property": "title-type"}
+        )
 
-    epub_chapter = epub.EpubHtml(
-        title=chapter.title,
-        file_name=filename,
-        lang="en",
-    )
-    epub_chapter.content = content.encode("utf-8")
-    epub_chapter.add_item(css_item)
+    epub_book.set_language(m.language)
+    for i, author in enumerate(m.authors, start=1):
+        uid = f"creator{i}"
+        epub_book.add_metadata("DC", "creator", author, {"id": uid})
+        epub_book.add_metadata(
+            None, "meta", _file_as(author), {"refines": f"#{uid}", "property": "file-as"}
+        )
+        epub_book.add_metadata(
+            None,
+            "meta",
+            "aut",
+            {"refines": f"#{uid}", "property": "role", "scheme": "marc:relators"},
+        )
 
-    return epub_chapter
+    if m.publisher:
+        epub_book.add_metadata("DC", "publisher", m.publisher)
+    if m.published:
+        epub_book.add_metadata("DC", "date", m.published)
+    if m.description:
+        epub_book.add_metadata("DC", "description", m.description)
+    if m.rights:
+        epub_book.add_metadata("DC", "rights", m.rights)
+    for subject in m.subjects:
+        epub_book.add_metadata("DC", "subject", subject)
 
-
-def _extract_body_content(html: str) -> str:
-    """Extract inner body content from HTML, removing wrapper tags."""
-    if not html:
-        return ""
-
-    # If it's wrapped in body tags, extract the inner content
-    body_match = re.search(r"<body[^>]*>(.*)</body>", html, re.DOTALL | re.IGNORECASE)
-    if body_match:
-        return body_match.group(1).strip()
-
-    # If it's a full HTML document, try to find body
-    if "<html" in html.lower():
-        from bs4 import BeautifulSoup
-        soup = BeautifulSoup(html, "lxml")
-        body = soup.find("body")
-        if body:
-            # Get inner HTML (children of body)
-            return "".join(str(child) for child in body.children)
-
-    return html
-
-
-def _wrap_html_content(title: str, body_content: str) -> str:
-    """Wrap HTML content in proper XHTML structure."""
-    # Ensure we have some content
-    if not body_content or not body_content.strip():
-        body_content = "<p>No content available.</p>"
-
-    return f"""<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE html>
-<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops">
-<head>
-    <title>{_escape_html(title)}</title>
-    <link rel="stylesheet" type="text/css" href="style/main.css"/>
-</head>
-<body>
-    <h1>{_escape_html(title)}</h1>
-    {body_content}
-</body>
-</html>"""
+    if any(a.media_type.startswith("font/") for a in book.assets):
+        # Tells Apple Books to honour the embedded fonts instead of its own.
+        epub_book.add_prefix(
+            "ibooks", "http://vocabulary.itunes.apple.com/rdf/ibooks/vocabulary-extensions-1.0/"
+        )
+        epub_book.add_metadata(None, "meta", "true", {"property": "ibooks:specified-fonts"})
 
 
-def _escape_html(text: str) -> str:
-    """Escape HTML special characters."""
-    return (
-        text.replace("&", "&amp;")
-        .replace("<", "&lt;")
-        .replace(">", "&gt;")
-        .replace('"', "&quot;")
-    )
+def _file_as(name: str) -> str:
+    """Sort key for an author name: "Grootendorst, Maarten"."""
+    parts = name.split()
+    if len(parts) < 2:
+        return name
+    return f"{parts[-1]}, {' '.join(parts[:-1])}"
 
 
-def _guess_image_extension(image_data: bytes) -> str:
-    """Guess image extension from magic bytes."""
-    if image_data[:8] == b"\x89PNG\r\n\x1a\n":
-        return "png"
-    if image_data[:2] == b"\xff\xd8":
-        return "jpg"
-    if image_data[:6] in (b"GIF87a", b"GIF89a"):
-        return "gif"
-    if image_data[:4] == b"RIFF" and image_data[8:12] == b"WEBP":
-        return "webp"
-    return "jpg"  # Default
+def _add_assets(epub_book: epub.EpubBook, book: Book) -> list[epub.EpubItem]:
+    """Add images, fonts and stylesheets; return the stylesheet items."""
+    stylesheets: list[epub.EpubItem] = []
+    for asset in book.assets:
+        if asset is book.cover:
+            continue  # already added by set_cover
+        item = epub.EpubItem(
+            uid=asset.uid,
+            file_name=asset.path,
+            media_type=asset.media_type,
+            content=asset.data,
+        )
+        epub_book.add_item(item)
+        if asset.media_type == "text/css":
+            stylesheets.append(item)
+
+    if not stylesheets:
+        item = epub.EpubItem(
+            uid="style-default",
+            file_name="style/default.css",
+            media_type="text/css",
+            content=DEFAULT_CSS.encode("utf-8"),
+        )
+        epub_book.add_item(item)
+        stylesheets.append(item)
+    return stylesheets
 
 
-def _get_default_css() -> str:
-    """Get default CSS for the EPUB."""
-    return """
-/* Base styles */
+def _add_chapters(
+    epub_book: epub.EpubBook, book: Book, stylesheets: list[epub.EpubItem]
+) -> dict[str, epub.EpubHtml]:
+    """Add one XHTML document per chapter, keyed by original path, in reading order."""
+    documents: dict[str, epub.EpubHtml] = {}
+    for chapter in book.chapters:
+        if len(chapter.html.strip()) < 50:
+            console.print(f"[dim]Skipping empty document: {chapter.title}[/]")
+            continue
+
+        document = epub.EpubHtml(
+            uid=chapter.uid,
+            file_name=chapter.filename,
+            title=chapter.title,
+            lang=book.metadata.language,
+        )
+        document.content = chapter.html.encode("utf-8")
+        if "<math" in chapter.html:
+            document.properties.append("mathml")
+        if "<svg" in chapter.html:
+            document.properties.append("svg")
+        chapter_dir = posixpath.dirname(chapter.filename) or "."
+        for stylesheet in stylesheets:
+            document.add_link(
+                href=posixpath.relpath(stylesheet.file_name, chapter_dir),
+                rel="stylesheet",
+                type="text/css",
+            )
+        epub_book.add_item(document)
+        documents[chapter.path] = document
+    return documents
+
+
+def _build_toc(
+    entries: list[TocEntry], documents: dict[str, epub.EpubHtml], chapters: list[Chapter]
+) -> list:
+    """Convert the nested TOC into ebooklib Sections/Links, dropping dangling anchors."""
+    ids = {c.path: set(re.findall(r'\bid="([^"]+)"', c.html)) for c in chapters}
+    counter = itertools.count(1)
+
+    def convert(entry: TocEntry) -> list:
+        children = [node for child in entry.children for node in convert(child)]
+        document = documents.get(entry.path)
+        if document is None:
+            return children  # document was skipped: hoist its children
+        href = document.file_name
+        if entry.fragment and entry.fragment in ids.get(entry.path, ()):
+            href += f"#{entry.fragment}"
+        if children:
+            return [(epub.Section(entry.title, href), children)]
+        return [epub.Link(href, entry.title, uid=f"toc{next(counter)}")]
+
+    toc = [node for entry in entries for node in convert(entry)]
+    if not toc:
+        toc = [
+            epub.Link(d.file_name, d.title, uid=f"toc{next(counter)}") for d in documents.values()
+        ]
+    return toc
+
+
+def _is_cover_page(chapter: Chapter) -> bool:
+    return "cover" in PurePosixPath(chapter.path).stem.lower() or 'data-type="cover"' in chapter.html
+
+
+# Used only when the book does not ship its own stylesheet.
+DEFAULT_CSS = """\
 body {
     font-family: Georgia, "Times New Roman", serif;
-    font-size: 1em;
     line-height: 1.6;
     margin: 1em;
-    padding: 0;
 }
 
-/* Headings */
 h1, h2, h3, h4, h5, h6 {
     font-family: Helvetica, Arial, sans-serif;
-    margin-top: 1.5em;
-    margin-bottom: 0.5em;
     line-height: 1.2;
+    margin: 1.5em 0 0.5em;
 }
 
 h1 { font-size: 1.8em; }
 h2 { font-size: 1.5em; }
 h3 { font-size: 1.3em; }
-h4 { font-size: 1.1em; }
 
-/* Paragraphs */
-p {
-    margin: 0.8em 0;
-    text-align: justify;
-}
+p { margin: 0.8em 0; }
 
-/* Code */
 pre, code {
     font-family: "Courier New", Courier, monospace;
     font-size: 0.9em;
-    background-color: #f4f4f4;
 }
 
 pre {
-    padding: 1em;
-    overflow-x: auto;
+    background-color: #f4f4f4;
     border: 1px solid #ddd;
-    border-radius: 4px;
+    padding: 1em;
     white-space: pre-wrap;
     word-wrap: break-word;
 }
 
-code {
-    padding: 0.2em 0.4em;
-    border-radius: 3px;
-}
-
-pre code {
-    padding: 0;
-    background: none;
-}
-
-/* Lists */
-ul, ol {
-    margin: 0.8em 0;
-    padding-left: 2em;
-}
-
-li {
-    margin: 0.3em 0;
-}
-
-/* Images */
 img {
     max-width: 100%;
     height: auto;
@@ -284,17 +255,16 @@ figure {
     text-align: center;
 }
 
-figcaption {
+figcaption, div.figure h6 {
     font-size: 0.9em;
     font-style: italic;
-    color: #666;
+    font-weight: normal;
 }
 
-/* Tables */
 table {
     border-collapse: collapse;
-    width: 100%;
     margin: 1em 0;
+    width: 100%;
 }
 
 th, td {
@@ -303,54 +273,16 @@ th, td {
     text-align: left;
 }
 
-th {
-    background-color: #f4f4f4;
-    font-weight: bold;
-}
-
-/* Blockquotes */
 blockquote {
+    border-left: 4px solid #ddd;
+    color: #555;
     margin: 1em 0;
     padding: 0.5em 1em;
-    border-left: 4px solid #ddd;
-    font-style: italic;
-    color: #555;
 }
 
-/* Links */
-a {
-    color: #0066cc;
-    text-decoration: none;
-}
-
-a:hover {
-    text-decoration: underline;
-}
-
-/* Notes and tips */
-.note, .tip, .warning, .caution {
-    padding: 1em;
+div[data-type="note"], div[data-type="tip"], div[data-type="warning"], div[data-type="caution"] {
+    border-left: 4px solid #999;
     margin: 1em 0;
-    border-radius: 4px;
-}
-
-.note {
-    background-color: #e7f3ff;
-    border-left: 4px solid #2196F3;
-}
-
-.tip {
-    background-color: #e8f5e9;
-    border-left: 4px solid #4CAF50;
-}
-
-.warning {
-    background-color: #fff3e0;
-    border-left: 4px solid #FF9800;
-}
-
-.caution {
-    background-color: #ffebee;
-    border-left: 4px solid #f44336;
+    padding: 0.5em 1em;
 }
 """

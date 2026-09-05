@@ -3,7 +3,13 @@
 ![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)
 ![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)
 
-A CLI to download O'Reilly books as EPUB for offline reading. Uses cookie-based authentication to access your subscription content and generates clean EPUBs with images, cover art, and proper chapter structure.
+A CLI to download O'Reilly books as EPUB for offline reading. Uses cookie-based authentication to access your subscription content and generates clean EPUBs that mirror the original book:
+
+- Full metadata for your library (Calibre, Apple Books, Kobo…): title and subtitle, authors with sort names, publisher, publication date, ISBN, description, subjects and rights.
+- Full-resolution cover, declared as the EPUB cover image.
+- Nested table of contents (parts → chapters → sections), taken from O'Reilly's own TOC.
+- Original file names, so footnotes, cross-references and index links keep working.
+- The book's own stylesheet, images and fonts, so it looks like the publisher's EPUB.
 
 ## Installation
 
@@ -32,8 +38,9 @@ oreilly-dl 9781098166298 -c cookies.json
 # By URL
 oreilly-dl "https://learning.oreilly.com/library/view/ai-engineering/9781098166298/" -c cookies.json
 
-# Custom output path
+# Custom output file or directory
 oreilly-dl 9781098166298 -c cookies.json -o "My Book.epub"
+oreilly-dl 9781098166298 -c cookies.json -o ~/Books/
 ```
 
 Example output:
