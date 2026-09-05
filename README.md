@@ -3,6 +3,8 @@
 ![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)
 ![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)
 
+Sebastián López's ([s110](https://github.com/s110)) version of the O'Reilly EPUB downloader, maintained independently from the [original by tctibbs](https://github.com/tctibbs/oreilly-epub-downloader) (MIT), with a rewritten EPUB pipeline.
+
 A CLI to download O'Reilly books as EPUB for offline reading. Uses cookie-based authentication to access your subscription content and generates clean EPUBs that mirror the original book:
 
 - Full metadata for your library (Calibre, Apple Books, Kobo…): title and subtitle, authors with sort names, publisher, publication date, ISBN, description, subjects and rights.
@@ -63,3 +65,7 @@ Cookies expire periodically. When downloads fail, re-export cookies from your br
 
 - Python 3.11+
 - Active O'Reilly Learning subscription
+
+## Credits
+
+Started from [tctibbs/oreilly-epub-downloader](https://github.com/tctibbs/oreilly-epub-downloader), MIT licensed. The metadata, TOC, styling and link handling were rewritten in this version; it is not kept in sync with the original.
