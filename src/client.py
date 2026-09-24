@@ -64,13 +64,36 @@ def _collapse(text: str) -> str:
     return re.sub(r"\s+", " ", text).strip()
 
 
+# Elements whose boundaries separate words even when the markup has no
+# whitespace between them. Inline tags (em, a, code...) do not: in
+# "<em>trees</em>." the period belongs to the same word.
+BLOCK_TAGS = [
+    "address", "article", "aside", "blockquote", "br", "dd", "div", "dl", "dt",
+    "figcaption", "figure", "footer", "h1", "h2", "h3", "h4", "h5", "h6",
+    "header", "hr", "li", "ol", "p", "pre", "section", "table", "td", "th",
+    "tr", "ul",
+]
+
+
+def _inline_text(tag) -> str:
+    """Text of `tag` with whitespace collapsed, spacing only at block boundaries.
+
+    `get_text(" ")` also puts a space at every inline tag boundary, which turns
+    "<em>trees</em>." into "trees .".
+    """
+    for block in tag.find_all(BLOCK_TAGS):
+        block.insert_before(" ")
+        block.insert_after(" ")
+    return _collapse(tag.get_text())
+
+
 def _html_to_text(html: str) -> str:
     """Flatten the catalogue's HTML description into plain paragraphs."""
     if not html:
         return ""
     soup = BeautifulSoup(html, "lxml")
     blocks = soup.find_all(["p", "li"])
-    paragraphs = [_collapse(b.get_text(" ")) for b in blocks] or [_collapse(soup.get_text(" "))]
+    paragraphs = [_inline_text(b) for b in blocks] or [_inline_text(soup)]
     return "\n\n".join(p for p in paragraphs if p)
 
 
@@ -272,13 +295,13 @@ class OreillyClient:
                 continue
             soup = BeautifulSoup(chapter.html, "lxml")
             if not metadata.subtitle and (tag := soup.select_one("p.subtitle")):
-                metadata.subtitle = _collapse(tag.get_text(" "))
+                metadata.subtitle = _inline_text(tag)
             if not metadata.rights and (tag := soup.select_one("p.copyright")):
-                metadata.rights = _collapse(tag.get_text(" "))
+                metadata.rights = _inline_text(tag)
             if not metadata.publisher and (tag := soup.select_one("span.publishername")):
-                metadata.publisher = _collapse(tag.get_text(" "))
+                metadata.publisher = _inline_text(tag)
             if not metadata.authors and (tag := soup.select_one("p.author")):
-                byline = re.sub(r"^by\s+", "", _collapse(tag.get_text(" ")), flags=re.I)
+                byline = re.sub(r"^by\s+", "", _inline_text(tag), flags=re.I)
                 metadata.authors = [a for a in re.split(r",\s*|\s+and\s+", byline) if a]
 
     # --------------------------------------------------------------- content

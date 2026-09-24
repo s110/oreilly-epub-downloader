@@ -44,10 +44,6 @@ EXPECTED_FILENAME = "¿Qué es un Grafo Árboles y Ñandúes.epub"
 # Checks that fail because of a real bug in the downloader, with the reason.
 # Remove an entry when the bug is fixed; the run fails until you do.
 KNOWN_FAILURES: dict[str, str] = {
-    "metadata_description_plain_text": (
-        "client._html_to_text joins inline tags with get_text(' '), so "
-        "'<em>árboles</em>.' becomes 'árboles .' (space before punctuation)"
-    ),
     "flaky_image_500_once_recovered": (
         "no retry on transient 5xx: _fetch_assets drops the file after one 500 "
         "(_fetch_chapters has the same pattern and would drop a whole chapter)"
