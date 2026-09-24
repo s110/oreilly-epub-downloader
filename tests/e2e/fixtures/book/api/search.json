@@ -1,0 +1,20 @@
+{
+  "results": [
+    {
+      "archive_id": "9780000000002",
+      "title": "Otro libro que no es este",
+      "authors": ["Autora Equivocada"],
+      "publishers": ["Editorial Equivocada"]
+    },
+    {
+      "archive_id": "9781234567897",
+      "title": "¿Qué es un Grafo? Árboles y Ñandúes",
+      "authors": ["José Ñúñez", "Zoë Østergaard"],
+      "publishers": ["Editorial Ficticia"],
+      "issued": "2025-01-01",
+      "description": "<p>Un libro   ficticio sobre <em>árboles</em>.</p><ul><li>Cubre grafos.</li><li>Incluye ñandúes.</li></ul>",
+      "topics_payload": [{"name": "Algoritmos"}, {"name": ""}, {"name": "Estructuras de datos"}],
+      "cover_url": "{BASE}covers/thumb.png"
+    }
+  ]
+}

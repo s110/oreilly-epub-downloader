@@ -1,0 +1,11 @@
+{
+  "count": 9,
+  "next": null,
+  "results": [
+    {"reference_id": "9781234567897-/text/ch02.html", "title": "Capítulo 2. Grafos", "content_url": "{BASE}api/v2/epubs/urn:orm:book:9781234567897/files/text/ch02.html"},
+    {"full_path": "text/part02.html", "title": "Parte II. Aplicaciones", "content_url": "{BASE}api/v2/epubs/urn:orm:book:9781234567897/files/text/part02.html"},
+    {"reference_id": "9781234567897-/text/ch03.html", "title": "Capítulo 3. Ñandúes", "content_url": "{BASE}api/v2/epubs/urn:orm:book:9781234567897/files/text/ch03.html"},
+    {"reference_id": "9781234567897-/text/nocontent.html", "title": "Sin URL de contenido"},
+    {"reference_id": "9781234567897-/text/appa.html", "title": "Apéndice A. Glosario", "content_url": "{BASE}api/v2/epubs/urn:orm:book:9781234567897/files/text/appa.html"}
+  ]
+}
