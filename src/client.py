@@ -1,5 +1,6 @@
 """O'Reilly API client for fetching book content."""
 
+import os
 import posixpath
 import random
 import re
@@ -25,9 +26,13 @@ from .models import Asset, Book, BookMetadata, Chapter, TocEntry
 
 console = Console()
 
-SITE = "https://learning.oreilly.com/"
+# OREILLY_DL_BASE_URL points the client at another server (the E2E suite runs
+# it against a local fake of the API). Unset in normal use.
+SITE = os.environ.get("OREILLY_DL_BASE_URL", "").rstrip("/") + "/"
+if SITE == "/":
+    SITE = "https://learning.oreilly.com/"
 API_BASE = f"{SITE}api/v2/"
-OREILLY_HOSTS = {"learning.oreilly.com", "www.oreilly.com", "oreilly.com"}
+OREILLY_HOSTS = {"learning.oreilly.com", "www.oreilly.com", "oreilly.com", urlsplit(SITE).netloc}
 
 # Files of the original EPUB that are not copied as assets: chapters are fetched
 # through the chapters API and the package/NCX files are regenerated on write.

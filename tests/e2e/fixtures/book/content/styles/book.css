@@ -1,0 +1,4 @@
+#sbo-rt-content { font-family: "DejaVu Serif", serif; }
+#sbo-rt-content h1, #sbo-rt-content h2 { font-family: "DejaVu Sans", sans-serif; }
+#sbo-rt-content > figure img { max-width: 100%; }
+#sbo-rt-content table tdiv tr td { padding: 0.25em; }

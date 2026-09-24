@@ -1,0 +1,11 @@
+{
+  "count": 9,
+  "next": "{BASE}api/v2/epub-chapters/?epub_identifier=urn%3Aorm%3Abook%3A9781234567897&limit=100&page=2",
+  "results": [
+    {"reference_id": "9781234567897-/text/cover.html", "title": "Portada", "content_url": "{BASE}api/v2/epubs/urn:orm:book:9781234567897/files/text/cover.html"},
+    {"reference_id": "9781234567897-/text/titlepage.html", "title": "Portadilla", "content_url": "{BASE}api/v2/epubs/urn:orm:book:9781234567897/files/text/titlepage.html"},
+    {"reference_id": "9781234567897-/text/copyright.html", "title": "Créditos", "content_url": "{BASE}api/v2/epubs/urn:orm:book:9781234567897/files/text/copyright.html"},
+    {"ourn": "urn:orm:book:9781234567897:chapter:text/part01.html", "title": "Parte I. Fundamentos", "content_url": "{BASE}api/v2/epubs/urn:orm:book:9781234567897/files/text/part01.html"},
+    {"reference_id": "9781234567897-/text/ch01.html", "title": "Capítulo 1.\n Árboles", "content_url": "{BASE}api/v2/epubs/urn:orm:book:9781234567897/files/text/ch01.html"}
+  ]
+}

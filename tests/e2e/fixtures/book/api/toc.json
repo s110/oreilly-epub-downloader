@@ -1,0 +1,22 @@
+[
+  {"title": "Parte I. Fundamentos", "reference_id": "9781234567897-/text/part01.html", "fragment": "part01", "children": [
+    {"title": "Capítulo 1. Árboles", "reference_id": "9781234567897-/text/ch01.html", "fragment": "ch01", "children": [
+      {"title": "1.1 Raíces", "reference_id": "9781234567897-/text/ch01.html", "fragment": "sec-1-1", "children": []},
+      {"title": "1.2  Ramas\n", "ourn": "urn:orm:book:9781234567897:chapter:text/ch01.html", "fragment": "sec-1-2", "children": [
+        {"title": "1.2.1 Hojas", "full_path": "text/ch01.html", "fragment": "sec-1-2-1", "children": []}
+      ]}
+    ]},
+    {"title": "Capítulo 2. Grafos", "reference_id": "9781234567897-/text/ch02.html", "fragment": "", "children": [
+      {"title": "2.1 Caminos", "reference_id": "9781234567897-/text/ch02.html", "fragment": "sec-2-1", "children": []},
+      {"title": "2.2 Ciclos", "reference_id": "9781234567897-/text/ch02.html", "fragment": "sec-2-fantasma", "children": []}
+    ]}
+  ]},
+  {"title": "Parte II. Aplicaciones", "reference_id": "9781234567897-/text/part02.html", "fragment": "", "children": [
+    {"title": "Capítulo 3.\n   Ñandúes", "reference_id": "9781234567897-/text/ch03.html", "fragment": "ch03", "children": [
+      {"title": "3.1 Rutas migratorias", "reference_id": "9781234567897-/text/ch03.html", "fragment": "sec-3-1", "children": []}
+    ]}
+  ]},
+  {"title": "Apéndice A. Glosario", "reference_id": "9781234567897-/text/appa.html", "fragment": "", "children": []},
+  {"title": "Índice", "reference_id": "9781234567897-/text/ix.html", "fragment": "", "children": []},
+  {"title": "", "reference_id": "9781234567897-/text/ch03.html", "fragment": "", "children": []}
+]
