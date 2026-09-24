@@ -181,6 +181,19 @@ def _font_faces(fonts: list[Asset], css_path: str) -> str:
     return "\n" + "\n".join(rules) + "\n"
 
 
+# Attributes that can point at another file of the book.
+REF_ATTRS = ("src", "href", "poster", "xlink:href", "data")
+
+
+def _is_relative_ref(ref: str) -> bool:
+    """True for a path relative to the document ("../images/a.png#x")."""
+    return bool(
+        ref
+        and not ref.startswith(("#", "/", "?"))
+        and not re.match(r"^[A-Za-z][A-Za-z0-9+.-]*:", ref)
+    )
+
+
 def _walk(entries: list[TocEntry]) -> Iterator[TocEntry]:
     for entry in entries:
         yield entry
@@ -228,6 +241,7 @@ class OreillyClient:
         missing = self._fetch_chapters(book_id, chapters, assets)
         if missing:
             self._fetch_missing_assets(book_id, missing, assets)
+        self._drop_dangling_refs(chapters, assets)
         self._read_front_matter(metadata, chapters)
         cover = self._pick_cover(chapters, assets, metadata)
 
@@ -528,6 +542,61 @@ class OreillyClient:
             assets.append(Asset(path=path, media_type=media_type.split(";")[0], data=response.content))
         console.print(f"[green]Recovered[/] {len(paths)} assets missing from the file listing")
 
+    @staticmethod
+    def _drop_dangling_refs(chapters: list[Chapter], assets: list[Asset]) -> None:
+        """Remove references to files the EPUB will not contain.
+
+        A file that could not be downloaded (a 404, or a transient error that
+        outlasted the retries) would otherwise stay referenced: readers show a
+        broken image and epubcheck reports RSC-007. An <img> becomes a visible
+        placeholder, `[Image not available: <alt text>]` in a
+        `span.missing-image`, so the reader knows something is missing. A
+        link keeps its text and id and only loses its href. Any other element
+        pointing at a missing file (<source>, <link>, SVG <image>) is removed.
+        """
+        available = {a.path for a in assets} | {c.filename for c in chapters if c.html}
+        removed = 0
+        for chapter in chapters:
+            if not chapter.html:
+                continue
+            # html.parser, unlike lxml, does not move fragment content around.
+            soup = BeautifulSoup(chapter.html, "html.parser")
+            chapter_dir = posixpath.dirname(chapter.path)
+            changed = False
+            for tag in soup.find_all(True):
+                if tag.decomposed:
+                    continue
+                for attr in REF_ATTRS:
+                    ref = tag.get(attr)
+                    if not isinstance(ref, str) or not _is_relative_ref(ref):
+                        continue
+                    path = unquote(urlsplit(ref).path)
+                    target = posixpath.normpath(posixpath.join(chapter_dir, path))
+                    if target in available:
+                        continue
+                    if tag.name == "img":
+                        alt = _collapse(tag.get("alt") or "")
+                        label = "Image not available" + (f": {alt}" if alt else "")
+                        span = soup.new_tag("span", attrs={"class": "missing-image"})
+                        if tag.get("id"):
+                            span["id"] = tag["id"]
+                        span.string = f"[{label}]"
+                        tag.replace_with(span)
+                    elif tag.name in ("a", "area"):
+                        del tag[attr]
+                    else:
+                        tag.decompose()
+                    changed = True
+                    removed += 1
+                    break
+            if changed:
+                chapter.html = str(soup)
+        if removed:
+            console.print(
+                f"[yellow]Warning: removed {removed} references to files "
+                "that could not be downloaded[/]"
+            )
+
     def _clean_html(
         self,
         html: str,
@@ -554,7 +623,7 @@ class OreillyClient:
 
         chapter_dir = posixpath.dirname(chapter.path)
         for tag in root.find_all(True):
-            for attr in ("src", "href", "poster", "xlink:href", "data"):
+            for attr in REF_ATTRS:
                 if tag.has_attr(attr) and isinstance(tag[attr], str):
                     tag[attr] = self._localize_ref(
                         tag[attr], chapter_dir, chapter_paths, asset_paths, book_id, missing

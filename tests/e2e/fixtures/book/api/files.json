@@ -1,5 +1,5 @@
 {
-  "count": 10,
+  "count": 11,
   "next": null,
   "results": [
     {"full_path": "text/cover.html", "filename": "cover.html", "media_type": "application/xhtml+xml", "url": "{BASE}api/v2/epubs/urn:orm:book:9781234567897/files/text/cover.html"},
@@ -11,6 +11,7 @@
     {"full_path": "images/cover-full.png", "filename": "cover-full.png", "media_type": "image/png", "url": "{BASE}api/v2/epubs/urn:orm:book:9781234567897/files/images/cover-full.png"},
     {"full_path": "images/fig1-1.png", "filename": "fig1-1.png", "media_type": "image/png", "url": "{BASE}api/v2/epubs/urn:orm:book:9781234567897/files/images/fig1-1.png"},
     {"full_path": "images/fig2-1.png", "filename": "fig2-1.png", "media_type": "image/png", "url": "{BASE}api/v2/epubs/urn:orm:book:9781234567897/files/images/fig2-1.png"},
-    {"full_path": "images/fig3-1.png", "filename": "fig3-1.png", "media_type": "image/png", "url": "{BASE}api/v2/epubs/urn:orm:book:9781234567897/files/images/fig3-1.png"}
+    {"full_path": "images/fig3-1.png", "filename": "fig3-1.png", "media_type": "image/png", "url": "{BASE}api/v2/epubs/urn:orm:book:9781234567897/files/images/fig3-1.png"},
+    {"full_path": "images/fig3-2.png", "filename": "fig3-2.png", "media_type": "image/png", "url": "{BASE}api/v2/epubs/urn:orm:book:9781234567897/files/images/fig3-2.png"}
   ]
 }

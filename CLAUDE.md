@@ -20,7 +20,7 @@ auth (`src/client.py`) and writes an EPUB (`src/epub.py`). Never read or commit
 python tests/e2e/run_e2e.py
 ```
 
-Takes about 35 s (the client's human-like delays are real). Offline: the CLI
+Takes about 40 s (the client's human-like delays are real). Offline: the CLI
 runs as a subprocess with `OREILLY_DL_BASE_URL` pointing at
 `tests/e2e/fake_oreilly.py` on 127.0.0.1 and a dead proxy for everything else,
 so it never reaches oreilly.com.
@@ -29,9 +29,10 @@ so it never reaches oreilly.com.
 title and authors: parts > chapters > sections three levels deep, a paginated
 chapter list, a TOC fragment that does not exist, images by relative path,
 by files-API URL and by reader URL (the last two missing from the file listing),
-an image that 404s, an image and a chapter that 500 once, a stylesheet that
-answers 429 with Retry-After once, cross-chapter links and footnotes, reader
-markup to strip, and a second run with an expired cookie (401).
+an image that 404s, an image that always 503s, an image and a chapter that
+500 once, a stylesheet that answers 429 with Retry-After once, cross-chapter
+links and footnotes, reader markup to strip, and a second run with an expired
+cookie (401).
 
 **Artifact.** `artifacts/e2e/fictitious_book.epub` and
 `artifacts/e2e/fictitious_book.json` (gitignored): per-check status, the EPUB's

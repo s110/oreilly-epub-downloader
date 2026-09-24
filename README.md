@@ -57,6 +57,15 @@ The book ID is the number in the O'Reilly URL:
 - URL: `https://learning.oreilly.com/library/view/ai-engineering/9781098166298/`
 - Book ID: `9781098166298`
 
+## Failed Downloads
+
+Timeouts, dropped connections and server errors (HTTP 5xx, 408, 429) are
+retried up to three times with a short backoff, honouring `Retry-After` up to
+30 seconds. A file that still cannot be downloaded is left out with a warning,
+and the EPUB never points at it: a missing image shows as the text
+`[Image not available: <alt text>]` (a `span.missing-image` you can style),
+and a link to a missing file keeps its text but stops being a link.
+
 ## Refreshing Cookies
 
 Cookies expire periodically. When downloads fail, re-export cookies from your browser.

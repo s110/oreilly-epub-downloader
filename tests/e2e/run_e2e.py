@@ -44,10 +44,6 @@ EXPECTED_FILENAME = "¿Qué es un Grafo Árboles y Ñandúes.epub"
 # Checks that fail because of a real bug in the downloader, with the reason.
 # Remove an entry when the bug is fixed; the run fails until you do.
 KNOWN_FAILURES: dict[str, str] = {
-    "no_dangling_references": (
-        "an image that failed to download (the 404) keeps its "
-        "<img src>, pointing at a file the EPUB does not contain (epubcheck RSC-007)"
-    ),
     "expired_cookie_message_says_refresh_cookies": (
         "a 401 surfaces as the raw httpx error; the 'cookies may have expired' hint "
         "is only printed when the chapter list comes back empty"
@@ -487,6 +483,37 @@ def check_book(
         got = {key: statuses.get(key) for key in want}
         return got == want, json.dumps(got)
 
+    def failed_images_placeholder():
+        # fig2-1 is a 404 inside a figure; fig3-2 is an inline image without alt
+        # whose 503s outlast the retries. Both become visible text, the rest of
+        # the figure and paragraph stays.
+        fig = epub.soup("text/ch02.xhtml").find(id="fig-2-1")
+        mapa = epub.soup("text/ch03.xhtml").find(id="mapa")
+        got = {
+            "fig-2-1": [
+                s.get_text() for s in fig.find_all("span", class_="missing-image")
+            ],
+            "mapa": [
+                s.get_text() for s in mapa.find_all("span", class_="missing-image")
+            ],
+        }
+        want = {
+            "fig-2-1": ["[Image not available: Figura 2-1. Un camino perdido]"],
+            "mapa": ["[Image not available]"],
+        }
+        seen = statuses.get("images/fig3-2.png") or []
+        bounded = 1 < len(seen) <= 5 and set(seen) == {503}
+        ok = (
+            got == want
+            and not fig.find("img")
+            and not mapa.find("img")
+            and fig.find("figcaption") is not None
+            and " ".join(mapa.get_text().split())
+            == "El mapa [Image not available] resume el recorrido."
+            and bounded
+        )
+        return ok, json.dumps({**got, "fig3-2 statuses": seen}, ensure_ascii=False)
+
     def no_dangling():
         dangling = []
         for doc in epub.content_docs:
@@ -597,6 +624,7 @@ def check_book(
         ("flaky_image_500_once_recovered", flaky_image),
         ("flaky_chapter_500_once_recovered", flaky_chapter),
         ("retries_transient_errors_only", retry_policy),
+        ("failed_images_visible_placeholder", failed_images_placeholder),
         ("no_dangling_references", no_dangling),
         ("cross_chapter_links_and_footnotes", cross_links),
         ("external_links_untouched", external_links),

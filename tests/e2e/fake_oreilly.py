@@ -9,6 +9,7 @@ relies on:
 - `images/fig2-1.png` is listed in the file listing but answers 404;
 - `images/fig3-1.png` and the chapter `text/ch01.html` answer 500 on their
   first request and 200 afterwards;
+- `images/fig3-2.png` is listed but always answers 503;
 - `styles/book.css` answers 429 with `Retry-After: 1` on its first request
   and 200 afterwards;
 - `images/fig1-2.png` and `images/fig1-3.png` are not in the file listing and
@@ -31,6 +32,7 @@ VALID_TOKEN = "e2e-valid-token"
 FIXTURES = Path(__file__).parent / "fixtures" / "book"
 FLAKY_ONCE = {"images/fig3-1.png", "text/ch01.html"}
 RATE_LIMITED_ONCE = {"styles/book.css"}
+ALWAYS_UNAVAILABLE = {"images/fig3-2.png"}
 MEDIA_TYPES = {
     ".html": "text/html; charset=utf-8",
     ".css": "text/css",
@@ -103,6 +105,8 @@ class FakeOreilly:
             rel = path[len(f"{api}files/") :]
             if rel in FLAKY_ONCE and self.hits[rel] == 1:
                 return 500, "text/plain", b"upstream hiccup"
+            if rel in ALWAYS_UNAVAILABLE:
+                return 503, "text/plain", b"service unavailable"
             if rel in RATE_LIMITED_ONCE and self.hits[rel] == 1:
                 return 429, "text/plain", b"slow down"
             return self._file(FIXTURES / "content", rel)
