@@ -1,11 +1,14 @@
 """O'Reilly API client for fetching book content."""
 
+import math
 import os
 import posixpath
 import random
 import re
 import time
 from collections.abc import Iterator
+from datetime import UTC, datetime
+from email.utils import parsedate_to_datetime
 from pathlib import PurePosixPath
 from typing import Any
 from urllib.parse import unquote, urlsplit
@@ -13,6 +16,7 @@ from urllib.parse import unquote, urlsplit
 import httpx
 from bs4 import BeautifulSoup
 from rich.console import Console
+from rich.markup import escape
 from rich.progress import (
     BarColumn,
     MofNCompleteColumn,
@@ -38,6 +42,40 @@ OREILLY_HOSTS = {"learning.oreilly.com", "www.oreilly.com", "oreilly.com", urlsp
 # through the chapters API and the package/NCX files are regenerated on write.
 HTML_TYPES = {"text/html", "application/xhtml+xml"}
 PACKAGE_TYPES = {"application/oebps-package+xml", "application/x-dtbncx+xml"}
+
+
+# Retries for transient failures. A request is tried at most MAX_ATTEMPTS
+# times, waiting BACKOFF_SECONDS * 2**n (with jitter) between tries, or what
+# the server's Retry-After asks for. A Retry-After above MAX_RETRY_AFTER is not
+# waited for: the request fails right away. Worst case per request is
+# MAX_ATTEMPTS timeouts plus (MAX_ATTEMPTS - 1) * MAX_RETRY_AFTER seconds.
+MAX_ATTEMPTS = 3
+BACKOFF_SECONDS = 1.0
+MAX_RETRY_AFTER = 30.0
+# 408 and 429 are the only client errors worth repeating; 501 and 505 are not
+# transient.
+RETRY_STATUSES = {408, 429, 500, 502, 503, 504}
+# Timeouts, refused or reset connections, and servers that hang up mid-response.
+# Proxy, URL and TLS-configuration errors are not retried.
+RETRY_ERRORS = (httpx.TimeoutException, httpx.NetworkError, httpx.RemoteProtocolError)
+
+
+def _retry_after(response: httpx.Response) -> float | None:
+    """Seconds the server asked to wait (Retry-After as seconds or HTTP date)."""
+    value = response.headers.get("retry-after", "").strip()
+    if not value:
+        return None
+    try:
+        seconds = float(value)
+    except ValueError:
+        try:
+            when = parsedate_to_datetime(value)
+        except (TypeError, ValueError):
+            return None
+        if when.tzinfo is None:
+            when = when.replace(tzinfo=UTC)
+        seconds = (when - datetime.now(UTC)).total_seconds()
+    return max(0.0, seconds) if math.isfinite(seconds) else None
 
 
 def human_delay(min_ms: int = 300, max_ms: int = 1500) -> None:
@@ -197,8 +235,38 @@ class OreillyClient:
 
     # ------------------------------------------------------------------ HTTP
 
+    def _get(self, url: str, params: dict | None = None) -> httpx.Response:
+        """GET with bounded retries on transient failures (see MAX_ATTEMPTS).
+
+        Returns the last response without raising for its status, so callers
+        handle a 404 or an exhausted 5xx as before; a transport error that is
+        still failing on the last attempt is raised.
+        """
+        for attempt in range(1, MAX_ATTEMPTS + 1):
+            last = attempt == MAX_ATTEMPTS
+            try:
+                response = self.http.get(url, params=params)
+            except RETRY_ERRORS as e:
+                if last:
+                    raise
+                wait, reason = None, type(e).__name__
+            else:
+                if response.status_code not in RETRY_STATUSES or last:
+                    return response
+                wait, reason = _retry_after(response), f"HTTP {response.status_code}"
+                if wait is not None and wait > MAX_RETRY_AFTER:
+                    return response
+            if wait is None:
+                wait = BACKOFF_SECONDS * 2 ** (attempt - 1) * random.uniform(0.75, 1.25)
+            name = PurePosixPath(urlsplit(url).path).name or url
+            console.print(
+                f"[dim]{escape(reason)} on {escape(name)}, retrying in {wait:.1f} s[/]"
+            )
+            time.sleep(wait)
+        raise AssertionError("unreachable")
+
     def _get_json(self, url: str, params: dict | None = None) -> Any:
-        response = self.http.get(url, params=params)
+        response = self._get(url, params=params)
         response.raise_for_status()
         return response.json()
 
@@ -230,7 +298,7 @@ class OreillyClient:
 
     def _get_metadata(self, book_id: str) -> BookMetadata:
         """Combine the EPUB record with the catalogue entry (authors, publisher, topics)."""
-        response = self.http.get(f"{API_BASE}epubs/{_book_urn(book_id)}/")
+        response = self._get(f"{API_BASE}epubs/{_book_urn(book_id)}/")
         if response.status_code == 404:
             raise ValueError(f"Book not found: {book_id}")
         response.raise_for_status()
@@ -276,7 +344,7 @@ class OreillyClient:
     def _scrape_book_page(self, book_id: str) -> tuple[list[str], str]:
         """Fallback: authors and publisher from the book page's Open Graph tags."""
         try:
-            response = self.http.get(f"{SITE}library/view/-/{book_id}/")
+            response = self._get(f"{SITE}library/view/-/{book_id}/")
             response.raise_for_status()
         except httpx.HTTPError:
             return [], ""
@@ -385,7 +453,7 @@ class OreillyClient:
                 progress.update(task, description=f"Assets: {name[:40]}")
                 human_delay(100, 300)
                 try:
-                    response = self.http.get(file["url"])
+                    response = self._get(file["url"])
                     response.raise_for_status()
                 except httpx.HTTPError as e:
                     console.print(f"[yellow]Warning: failed to fetch {name}: {e}[/]")
@@ -428,7 +496,7 @@ class OreillyClient:
                 human_delay(1000, 2500) if i < 3 else human_delay(500, 1500)
 
                 try:
-                    response = self.http.get(chapter.content_url)
+                    response = self._get(chapter.content_url)
                     response.raise_for_status()
                 except httpx.HTTPError as e:
                     console.print(f"[yellow]Warning: failed to fetch {chapter.title}: {e}[/]")
@@ -451,7 +519,7 @@ class OreillyClient:
         for path in sorted(paths):
             human_delay(100, 300)
             try:
-                response = self.http.get(f"{API_BASE}epubs/{_book_urn(book_id)}/files/{path}")
+                response = self._get(f"{API_BASE}epubs/{_book_urn(book_id)}/files/{path}")
                 response.raise_for_status()
             except httpx.HTTPError as e:
                 console.print(f"[yellow]Warning: failed to fetch {path}: {e}[/]")
@@ -559,7 +627,7 @@ class OreillyClient:
 
         if metadata.cover_url:
             try:
-                response = self.http.get(metadata.cover_url)
+                response = self._get(metadata.cover_url)
                 response.raise_for_status()
             except httpx.HTTPError as e:
                 console.print(f"[yellow]Warning: failed to fetch cover: {e}[/]")

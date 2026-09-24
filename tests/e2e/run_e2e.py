@@ -44,12 +44,8 @@ EXPECTED_FILENAME = "¿Qué es un Grafo Árboles y Ñandúes.epub"
 # Checks that fail because of a real bug in the downloader, with the reason.
 # Remove an entry when the bug is fixed; the run fails until you do.
 KNOWN_FAILURES: dict[str, str] = {
-    "flaky_image_500_once_recovered": (
-        "no retry on transient 5xx: _fetch_assets drops the file after one 500 "
-        "(_fetch_chapters has the same pattern and would drop a whole chapter)"
-    ),
     "no_dangling_references": (
-        "an image that failed to download (404, or the unretried 500) keeps its "
+        "an image that failed to download (the 404) keeps its "
         "<img src>, pointing at a file the EPUB does not contain (epubcheck RSC-007)"
     ),
     "expired_cookie_message_says_refresh_cookies": (
@@ -312,7 +308,13 @@ def toc_from_ncx(epub: Epub) -> list:
     return walk(root.find("ncx:navMap", NS))
 
 
-def check_book(checks: Checks, epub: Epub, stdout: str, base_url: str) -> None:
+def check_book(
+    checks: Checks,
+    epub: Epub,
+    stdout: str,
+    base_url: str,
+    statuses: dict[str, list[int]],
+) -> None:
     def metadata_title():
         titles = {t.get("id"): t.text for t in epub.dc("title")}
         types = (
@@ -463,6 +465,28 @@ def check_book(checks: Checks, epub: Epub, stdout: str, base_url: str) -> None:
         )
         return present, f"src={src} packaged={epub.has(target)}"
 
+    def flaky_chapter():
+        # ch01 answers 500 once; the retry must bring the whole chapter back.
+        seen = statuses.get("text/ch01.html")
+        ids = epub.ids("text/ch01.xhtml") if epub.has("text/ch01.xhtml") else set()
+        ok = (
+            seen == [500, 200]
+            and "text/ch01.xhtml" in epub.content_docs
+            and {"ch01", "sec-1-1", "sec-1-2-1", "fig-1-1", "fn1"} <= ids
+        )
+        return ok, f"statuses={seen} in_spine={'text/ch01.xhtml' in epub.content_docs}"
+
+    def retry_policy():
+        # Transient errors are retried once each; a 404 is final and not repeated.
+        want = {
+            "images/fig3-1.png": [500, 200],
+            "text/ch01.html": [500, 200],
+            "styles/book.css": [429, 200],
+            "images/fig2-1.png": [404],
+        }
+        got = {key: statuses.get(key) for key in want}
+        return got == want, json.dumps(got)
+
     def no_dangling():
         dangling = []
         for doc in epub.content_docs:
@@ -571,6 +595,8 @@ def check_book(checks: Checks, epub: Epub, stdout: str, base_url: str) -> None:
         ("images_absolute_urls_recovered", images_absolute),
         ("missing_image_404_warns_and_continues", missing_image_continues),
         ("flaky_image_500_once_recovered", flaky_image),
+        ("flaky_chapter_500_once_recovered", flaky_chapter),
+        ("retries_transient_errors_only", retry_policy),
         ("no_dangling_references", no_dangling),
         ("cross_chapter_links_and_footnotes", cross_links),
         ("external_links_untouched", external_links),
@@ -600,6 +626,7 @@ def main() -> int:
                     server.base_url, E2E / "fixtures/session-valid.json", out
                 )
                 base_url = server.base_url
+                statuses = dict(server.statuses)
             produced = sorted(p.name for p in out.glob("*.epub"))
             if attempt == 1:
                 output = proc.stdout + proc.stderr
@@ -621,6 +648,7 @@ def main() -> int:
                     Epub(epub_path),
                     output.replace(base_url, "{BASE}"),
                     base_url,
+                    statuses,
                 )
             if produced:
                 hashes.append(normalized_hash(out / produced[0], base_url))
