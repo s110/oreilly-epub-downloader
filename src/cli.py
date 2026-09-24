@@ -7,9 +7,10 @@ from pathlib import Path
 import click
 from rich import box
 from rich.console import Console
+from rich.markup import escape
 from rich.table import Table
 
-from .client import OreillyClient
+from .client import AuthError, OreillyClient
 from .cookie_auth import load_cookies
 from .epub import create_epub
 from .models import Book
@@ -107,6 +108,13 @@ def main(book: str, cookies: Path, output: Path | None) -> None:
         create_epub(book_data, output_path)
         print_summary(book_data, output_path)
 
+    except AuthError as e:
+        console.print(f"\n[bold red]Error:[/] {e}")
+        console.print(
+            "Log in to learning.oreilly.com in your browser, export fresh cookies "
+            f"to {escape(str(cookies))} (see the README) and run the command again."
+        )
+        sys.exit(1)
     except KeyboardInterrupt:
         console.print("\n[yellow]Cancelled[/]")
         sys.exit(130)

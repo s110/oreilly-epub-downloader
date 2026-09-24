@@ -43,12 +43,7 @@ EXPECTED_FILENAME = "¿Qué es un Grafo Árboles y Ñandúes.epub"
 
 # Checks that fail because of a real bug in the downloader, with the reason.
 # Remove an entry when the bug is fixed; the run fails until you do.
-KNOWN_FAILURES: dict[str, str] = {
-    "expired_cookie_message_says_refresh_cookies": (
-        "a 401 surfaces as the raw httpx error; the 'cookies may have expired' hint "
-        "is only printed when the chapter list comes back empty"
-    ),
-}
+KNOWN_FAILURES: dict[str, str] = {}
 
 NS = {
     "opf": "http://www.idpf.org/2007/opf",
@@ -695,6 +690,7 @@ def main() -> int:
         with FakeOreilly() as server:
             proc = run_cli(server.base_url, E2E / "fixtures/session-expired.json", out)
             text = (proc.stdout + proc.stderr).replace(server.base_url, "{BASE}")
+            expired_statuses = dict(server.statuses)
         produced = sorted(p.name for p in out.iterdir())
         checks.add(
             "expired_cookie_fails_without_output",
@@ -710,6 +706,14 @@ def main() -> int:
                 for line in text.splitlines()
                 if "Error" in line or "error" in line
             )[:300],
+        )
+
+        # The first 401 ends the run: not retried, nothing else requested.
+        requests = sum(len(s) for s in expired_statuses.values())
+        checks.add(
+            "expired_cookie_stops_at_first_401",
+            requests == 1 and all(s == [401] for s in expired_statuses.values()),
+            f"requests={requests} statuses={sorted(expired_statuses.items())}",
         )
 
     counts = {

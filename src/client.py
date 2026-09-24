@@ -60,6 +60,15 @@ RETRY_STATUSES = {408, 429, 500, 502, 503, 504}
 RETRY_ERRORS = (httpx.TimeoutException, httpx.NetworkError, httpx.RemoteProtocolError)
 
 
+class AuthError(Exception):
+    """O'Reilly rejected the session: the cookies expired or are not valid.
+
+    Deliberately not an httpx.HTTPError or ValueError, which several fetches
+    catch to carry on without optional data; an expired session has to stop
+    the download.
+    """
+
+
 def _retry_after(response: httpx.Response) -> float | None:
     """Seconds the server asked to wait (Retry-After as seconds or HTTP date)."""
     value = response.headers.get("retry-after", "").strip()
@@ -254,7 +263,9 @@ class OreillyClient:
 
         Returns the last response without raising for its status, so callers
         handle a 404 or an exhausted 5xx as before; a transport error that is
-        still failing on the last attempt is raised.
+        still failing on the last attempt is raised. A 401 from O'Reilly raises
+        AuthError at once, wherever it happens, instead of producing a book
+        with holes.
         """
         for attempt in range(1, MAX_ATTEMPTS + 1):
             last = attempt == MAX_ATTEMPTS
@@ -265,6 +276,14 @@ class OreillyClient:
                     raise
                 wait, reason = None, type(e).__name__
             else:
+                if (
+                    response.status_code == 401
+                    and urlsplit(str(response.url)).netloc in OREILLY_HOSTS
+                ):
+                    raise AuthError(
+                        "O'Reilly answered 401 Unauthorized: the session cookies "
+                        "have expired or are not valid."
+                    )
                 if response.status_code not in RETRY_STATUSES or last:
                     return response
                 wait, reason = _retry_after(response), f"HTTP {response.status_code}"

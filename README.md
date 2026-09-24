@@ -68,7 +68,9 @@ and a link to a missing file keeps its text but stops being a link.
 
 ## Refreshing Cookies
 
-Cookies expire periodically. When downloads fail, re-export cookies from your browser.
+Cookies expire periodically. When they do, O'Reilly answers 401 Unauthorized
+and the download stops with a message asking you to renew them: log in again
+and repeat step 1 to overwrite `cookies.json`.
 
 ## Requirements
 
