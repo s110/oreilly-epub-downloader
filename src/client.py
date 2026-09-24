@@ -1,11 +1,14 @@
 """O'Reilly API client for fetching book content."""
 
+import math
 import os
 import posixpath
 import random
 import re
 import time
 from collections.abc import Iterator
+from datetime import UTC, datetime
+from email.utils import parsedate_to_datetime
 from pathlib import PurePosixPath
 from typing import Any
 from urllib.parse import unquote, urlsplit
@@ -13,6 +16,7 @@ from urllib.parse import unquote, urlsplit
 import httpx
 from bs4 import BeautifulSoup
 from rich.console import Console
+from rich.markup import escape
 from rich.progress import (
     BarColumn,
     MofNCompleteColumn,
@@ -40,6 +44,49 @@ HTML_TYPES = {"text/html", "application/xhtml+xml"}
 PACKAGE_TYPES = {"application/oebps-package+xml", "application/x-dtbncx+xml"}
 
 
+# Retries for transient failures. A request is tried at most MAX_ATTEMPTS
+# times, waiting BACKOFF_SECONDS * 2**n (with jitter) between tries, or what
+# the server's Retry-After asks for. A Retry-After above MAX_RETRY_AFTER is not
+# waited for: the request fails right away. Worst case per request is
+# MAX_ATTEMPTS timeouts plus (MAX_ATTEMPTS - 1) * MAX_RETRY_AFTER seconds.
+MAX_ATTEMPTS = 3
+BACKOFF_SECONDS = 1.0
+MAX_RETRY_AFTER = 30.0
+# 408 and 429 are the only client errors worth repeating; 501 and 505 are not
+# transient.
+RETRY_STATUSES = {408, 429, 500, 502, 503, 504}
+# Timeouts, refused or reset connections, and servers that hang up mid-response.
+# Proxy, URL and TLS-configuration errors are not retried.
+RETRY_ERRORS = (httpx.TimeoutException, httpx.NetworkError, httpx.RemoteProtocolError)
+
+
+class AuthError(Exception):
+    """O'Reilly rejected the session: the cookies expired or are not valid.
+
+    Deliberately not an httpx.HTTPError or ValueError, which several fetches
+    catch to carry on without optional data; an expired session has to stop
+    the download.
+    """
+
+
+def _retry_after(response: httpx.Response) -> float | None:
+    """Seconds the server asked to wait (Retry-After as seconds or HTTP date)."""
+    value = response.headers.get("retry-after", "").strip()
+    if not value:
+        return None
+    try:
+        seconds = float(value)
+    except ValueError:
+        try:
+            when = parsedate_to_datetime(value)
+        except (TypeError, ValueError):
+            return None
+        if when.tzinfo is None:
+            when = when.replace(tzinfo=UTC)
+        seconds = (when - datetime.now(UTC)).total_seconds()
+    return max(0.0, seconds) if math.isfinite(seconds) else None
+
+
 def human_delay(min_ms: int = 300, max_ms: int = 1500) -> None:
     """Add a random human-like delay between requests."""
     time.sleep(random.randint(min_ms, max_ms) / 1000)
@@ -64,13 +111,36 @@ def _collapse(text: str) -> str:
     return re.sub(r"\s+", " ", text).strip()
 
 
+# Elements whose boundaries separate words even when the markup has no
+# whitespace between them. Inline tags (em, a, code...) do not: in
+# "<em>trees</em>." the period belongs to the same word.
+BLOCK_TAGS = [
+    "address", "article", "aside", "blockquote", "br", "dd", "div", "dl", "dt",
+    "figcaption", "figure", "footer", "h1", "h2", "h3", "h4", "h5", "h6",
+    "header", "hr", "li", "ol", "p", "pre", "section", "table", "td", "th",
+    "tr", "ul",
+]
+
+
+def _inline_text(tag) -> str:
+    """Text of `tag` with whitespace collapsed, spacing only at block boundaries.
+
+    `get_text(" ")` also puts a space at every inline tag boundary, which turns
+    "<em>trees</em>." into "trees .".
+    """
+    for block in tag.find_all(BLOCK_TAGS):
+        block.insert_before(" ")
+        block.insert_after(" ")
+    return _collapse(tag.get_text())
+
+
 def _html_to_text(html: str) -> str:
     """Flatten the catalogue's HTML description into plain paragraphs."""
     if not html:
         return ""
     soup = BeautifulSoup(html, "lxml")
     blocks = soup.find_all(["p", "li"])
-    paragraphs = [_collapse(b.get_text(" ")) for b in blocks] or [_collapse(soup.get_text(" "))]
+    paragraphs = [_inline_text(b) for b in blocks] or [_inline_text(soup)]
     return "\n\n".join(p for p in paragraphs if p)
 
 
@@ -120,6 +190,19 @@ def _font_faces(fonts: list[Asset], css_path: str) -> str:
     return "\n" + "\n".join(rules) + "\n"
 
 
+# Attributes that can point at another file of the book.
+REF_ATTRS = ("src", "href", "poster", "xlink:href", "data")
+
+
+def _is_relative_ref(ref: str) -> bool:
+    """True for a path relative to the document ("../images/a.png#x")."""
+    return bool(
+        ref
+        and not ref.startswith(("#", "/", "?"))
+        and not re.match(r"^[A-Za-z][A-Za-z0-9+.-]*:", ref)
+    )
+
+
 def _walk(entries: list[TocEntry]) -> Iterator[TocEntry]:
     for entry in entries:
         yield entry
@@ -167,6 +250,7 @@ class OreillyClient:
         missing = self._fetch_chapters(book_id, chapters, assets)
         if missing:
             self._fetch_missing_assets(book_id, missing, assets)
+        self._drop_dangling_refs(chapters, assets)
         self._read_front_matter(metadata, chapters)
         cover = self._pick_cover(chapters, assets, metadata)
 
@@ -174,8 +258,48 @@ class OreillyClient:
 
     # ------------------------------------------------------------------ HTTP
 
+    def _get(self, url: str, params: dict | None = None) -> httpx.Response:
+        """GET with bounded retries on transient failures (see MAX_ATTEMPTS).
+
+        Returns the last response without raising for its status, so callers
+        handle a 404 or an exhausted 5xx as before; a transport error that is
+        still failing on the last attempt is raised. A 401 from O'Reilly raises
+        AuthError at once, wherever it happens, instead of producing a book
+        with holes.
+        """
+        for attempt in range(1, MAX_ATTEMPTS + 1):
+            last = attempt == MAX_ATTEMPTS
+            try:
+                response = self.http.get(url, params=params)
+            except RETRY_ERRORS as e:
+                if last:
+                    raise
+                wait, reason = None, type(e).__name__
+            else:
+                if (
+                    response.status_code == 401
+                    and urlsplit(str(response.url)).netloc in OREILLY_HOSTS
+                ):
+                    raise AuthError(
+                        "O'Reilly answered 401 Unauthorized: the session cookies "
+                        "have expired or are not valid."
+                    )
+                if response.status_code not in RETRY_STATUSES or last:
+                    return response
+                wait, reason = _retry_after(response), f"HTTP {response.status_code}"
+                if wait is not None and wait > MAX_RETRY_AFTER:
+                    return response
+            if wait is None:
+                wait = BACKOFF_SECONDS * 2 ** (attempt - 1) * random.uniform(0.75, 1.25)
+            name = PurePosixPath(urlsplit(url).path).name or url
+            console.print(
+                f"[dim]{escape(reason)} on {escape(name)}, retrying in {wait:.1f} s[/]"
+            )
+            time.sleep(wait)
+        raise AssertionError("unreachable")
+
     def _get_json(self, url: str, params: dict | None = None) -> Any:
-        response = self.http.get(url, params=params)
+        response = self._get(url, params=params)
         response.raise_for_status()
         return response.json()
 
@@ -207,7 +331,7 @@ class OreillyClient:
 
     def _get_metadata(self, book_id: str) -> BookMetadata:
         """Combine the EPUB record with the catalogue entry (authors, publisher, topics)."""
-        response = self.http.get(f"{API_BASE}epubs/{_book_urn(book_id)}/")
+        response = self._get(f"{API_BASE}epubs/{_book_urn(book_id)}/")
         if response.status_code == 404:
             raise ValueError(f"Book not found: {book_id}")
         response.raise_for_status()
@@ -253,7 +377,7 @@ class OreillyClient:
     def _scrape_book_page(self, book_id: str) -> tuple[list[str], str]:
         """Fallback: authors and publisher from the book page's Open Graph tags."""
         try:
-            response = self.http.get(f"{SITE}library/view/-/{book_id}/")
+            response = self._get(f"{SITE}library/view/-/{book_id}/")
             response.raise_for_status()
         except httpx.HTTPError:
             return [], ""
@@ -272,13 +396,13 @@ class OreillyClient:
                 continue
             soup = BeautifulSoup(chapter.html, "lxml")
             if not metadata.subtitle and (tag := soup.select_one("p.subtitle")):
-                metadata.subtitle = _collapse(tag.get_text(" "))
+                metadata.subtitle = _inline_text(tag)
             if not metadata.rights and (tag := soup.select_one("p.copyright")):
-                metadata.rights = _collapse(tag.get_text(" "))
+                metadata.rights = _inline_text(tag)
             if not metadata.publisher and (tag := soup.select_one("span.publishername")):
-                metadata.publisher = _collapse(tag.get_text(" "))
+                metadata.publisher = _inline_text(tag)
             if not metadata.authors and (tag := soup.select_one("p.author")):
-                byline = re.sub(r"^by\s+", "", _collapse(tag.get_text(" ")), flags=re.I)
+                byline = re.sub(r"^by\s+", "", _inline_text(tag), flags=re.I)
                 metadata.authors = [a for a in re.split(r",\s*|\s+and\s+", byline) if a]
 
     # --------------------------------------------------------------- content
@@ -362,7 +486,7 @@ class OreillyClient:
                 progress.update(task, description=f"Assets: {name[:40]}")
                 human_delay(100, 300)
                 try:
-                    response = self.http.get(file["url"])
+                    response = self._get(file["url"])
                     response.raise_for_status()
                 except httpx.HTTPError as e:
                     console.print(f"[yellow]Warning: failed to fetch {name}: {e}[/]")
@@ -405,7 +529,7 @@ class OreillyClient:
                 human_delay(1000, 2500) if i < 3 else human_delay(500, 1500)
 
                 try:
-                    response = self.http.get(chapter.content_url)
+                    response = self._get(chapter.content_url)
                     response.raise_for_status()
                 except httpx.HTTPError as e:
                     console.print(f"[yellow]Warning: failed to fetch {chapter.title}: {e}[/]")
@@ -428,7 +552,7 @@ class OreillyClient:
         for path in sorted(paths):
             human_delay(100, 300)
             try:
-                response = self.http.get(f"{API_BASE}epubs/{_book_urn(book_id)}/files/{path}")
+                response = self._get(f"{API_BASE}epubs/{_book_urn(book_id)}/files/{path}")
                 response.raise_for_status()
             except httpx.HTTPError as e:
                 console.print(f"[yellow]Warning: failed to fetch {path}: {e}[/]")
@@ -436,6 +560,61 @@ class OreillyClient:
             media_type = response.headers.get("content-type", "application/octet-stream")
             assets.append(Asset(path=path, media_type=media_type.split(";")[0], data=response.content))
         console.print(f"[green]Recovered[/] {len(paths)} assets missing from the file listing")
+
+    @staticmethod
+    def _drop_dangling_refs(chapters: list[Chapter], assets: list[Asset]) -> None:
+        """Remove references to files the EPUB will not contain.
+
+        A file that could not be downloaded (a 404, or a transient error that
+        outlasted the retries) would otherwise stay referenced: readers show a
+        broken image and epubcheck reports RSC-007. An <img> becomes a visible
+        placeholder, `[Image not available: <alt text>]` in a
+        `span.missing-image`, so the reader knows something is missing. A
+        link keeps its text and id and only loses its href. Any other element
+        pointing at a missing file (<source>, <link>, SVG <image>) is removed.
+        """
+        available = {a.path for a in assets} | {c.filename for c in chapters if c.html}
+        removed = 0
+        for chapter in chapters:
+            if not chapter.html:
+                continue
+            # html.parser, unlike lxml, does not move fragment content around.
+            soup = BeautifulSoup(chapter.html, "html.parser")
+            chapter_dir = posixpath.dirname(chapter.path)
+            changed = False
+            for tag in soup.find_all(True):
+                if tag.decomposed:
+                    continue
+                for attr in REF_ATTRS:
+                    ref = tag.get(attr)
+                    if not isinstance(ref, str) or not _is_relative_ref(ref):
+                        continue
+                    path = unquote(urlsplit(ref).path)
+                    target = posixpath.normpath(posixpath.join(chapter_dir, path))
+                    if target in available:
+                        continue
+                    if tag.name == "img":
+                        alt = _collapse(tag.get("alt") or "")
+                        label = "Image not available" + (f": {alt}" if alt else "")
+                        span = soup.new_tag("span", attrs={"class": "missing-image"})
+                        if tag.get("id"):
+                            span["id"] = tag["id"]
+                        span.string = f"[{label}]"
+                        tag.replace_with(span)
+                    elif tag.name in ("a", "area"):
+                        del tag[attr]
+                    else:
+                        tag.decompose()
+                    changed = True
+                    removed += 1
+                    break
+            if changed:
+                chapter.html = str(soup)
+        if removed:
+            console.print(
+                f"[yellow]Warning: removed {removed} references to files "
+                "that could not be downloaded[/]"
+            )
 
     def _clean_html(
         self,
@@ -463,7 +642,7 @@ class OreillyClient:
 
         chapter_dir = posixpath.dirname(chapter.path)
         for tag in root.find_all(True):
-            for attr in ("src", "href", "poster", "xlink:href", "data"):
+            for attr in REF_ATTRS:
                 if tag.has_attr(attr) and isinstance(tag[attr], str):
                     tag[attr] = self._localize_ref(
                         tag[attr], chapter_dir, chapter_paths, asset_paths, book_id, missing
@@ -536,7 +715,7 @@ class OreillyClient:
 
         if metadata.cover_url:
             try:
-                response = self.http.get(metadata.cover_url)
+                response = self._get(metadata.cover_url)
                 response.raise_for_status()
             except httpx.HTTPError as e:
                 console.print(f"[yellow]Warning: failed to fetch cover: {e}[/]")
