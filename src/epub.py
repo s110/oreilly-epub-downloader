@@ -7,6 +7,7 @@ from pathlib import Path, PurePosixPath
 
 from ebooklib import epub
 from rich.console import Console
+from rich.markup import escape
 
 from .models import Book, Chapter, TocEntry
 
@@ -23,7 +24,7 @@ def create_epub(book: Book, output_path: Path) -> Path:
     Returns:
         Path to the created EPUB file
     """
-    console.print(f"[bold]Creating EPUB:[/] {book.metadata.title}")
+    console.print(f"[bold]Creating EPUB:[/] {escape(book.metadata.title)}")
 
     epub_book = epub.EpubBook()
     _add_metadata(epub_book, book)
@@ -155,7 +156,7 @@ def _add_chapters(
     documents: dict[str, epub.EpubHtml] = {}
     for chapter in book.chapters:
         if len(chapter.html.strip()) < 50:
-            console.print(f"[dim]Skipping empty document: {chapter.title}[/]")
+            console.print(f"[dim]Skipping empty document: {escape(chapter.title)}[/]")
             continue
 
         document = epub.EpubHtml(

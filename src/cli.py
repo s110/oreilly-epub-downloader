@@ -24,7 +24,12 @@ def extract_book_id(book_input: str) -> str:
     """Extract book ID from URL or direct input."""
     # Audiobook ids (ISBN + "AU") keep their suffix, in upper case as the API
     # expects, wherever they appear: /library/view/, /videos/, a URN or alone.
-    match = re.search(r"(?<![0-9A-Za-z])(\d{9,13}X?AU)(?![0-9A-Za-z])", book_input, re.I)
+    match = re.search(
+        r"(?:/library/view/[^/?#]+/|/videos/[^/?#]+/|urn:orm:audiobook:|^\s*)"
+        r"(\d{9,13}X?AU)(?=[/?#]|\s*$)",
+        book_input,
+        re.I,
+    )
     if match:
         return match.group(1).upper()
 
@@ -65,6 +70,9 @@ def check_audio_output(output: Path | None, split: bool) -> None:
     """Refuse, before the download, an -o the audiobook cannot be written to."""
     if output is None or output.is_dir():
         return
+    blocker = next((p for p in output.parents if p.exists() and not p.is_dir()), None)
+    if blocker:
+        raise click.BadParameter(f"{blocker} is a file, not a folder", param_hint="-o/--output")
     if split and output.exists():
         raise click.BadParameter(
             f"{output} is a file; --split needs a folder", param_hint="-o/--output"
@@ -121,7 +129,7 @@ def print_summary(book: Book, output_path: Path) -> None:
     table = Table(box=box.SIMPLE, show_header=False, pad_edge=False)
     table.add_column(style="dim")
     table.add_column()
-    table.add_row("Title", m.title + (f" — {m.subtitle}" if m.subtitle else ""))
+    table.add_row("Title", escape(m.title + (f" — {m.subtitle}" if m.subtitle else "")))
     table.add_row("Authors", ", ".join(m.authors) or "[yellow]unknown[/]")
     table.add_row("Publisher", m.publisher or "[yellow]unknown[/]")
     table.add_row("Published", m.published or "[yellow]unknown[/]")
@@ -131,7 +139,7 @@ def print_summary(book: Book, output_path: Path) -> None:
     table.add_row("Content", f"{len(book.chapters)} documents, {len(book.assets)} assets")
     table.add_row("Size", f"{output_path.stat().st_size / 1_000_000:.1f} MB")
     console.print(table)
-    console.print(f"[bold green]Done:[/] {output_path}")
+    console.print(f"[bold green]Done:[/] {escape(str(output_path))}")
 
 
 @click.command()

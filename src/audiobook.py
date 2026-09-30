@@ -75,7 +75,10 @@ def _expiry(value: Any) -> float:
     """
     seconds: float | None = None
     if isinstance(value, int | float) and not isinstance(value, bool):
-        seconds = float(value)
+        try:
+            seconds = float(value)
+        except OverflowError:
+            pass
     elif isinstance(value, str):
         try:
             seconds = float(value)

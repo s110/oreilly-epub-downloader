@@ -37,14 +37,15 @@ if SITE == "/":
     SITE = "https://learning.oreilly.com/"
 API_BASE = f"{SITE}api/v2/"
 OREILLY_HOSTS = {"learning.oreilly.com", "www.oreilly.com", "oreilly.com", urlsplit(SITE).netloc}
-# Domain the session cookies are sent to: oreilly.com and its subdomains, or
-# the host of OREILLY_DL_BASE_URL. Never any other host, even when a URL from
-# the API (a cover, a redirect) points elsewhere.
-COOKIE_DOMAIN = (
-    ".oreilly.com"
-    if urlsplit(SITE).hostname in ("oreilly.com", "learning.oreilly.com", "www.oreilly.com")
-    else urlsplit(SITE).hostname or ""
-)
+SITE_HOST = (urlsplit(SITE).hostname or "").lower()
+
+
+def _sends_cookies(host: str) -> bool:
+    """The session cookies go to oreilly.com, its subdomains and the host of
+    OREILLY_DL_BASE_URL only; never to another host, even when a URL from the
+    API (a cover, a redirect) points there."""
+    host = host.lower()
+    return host == SITE_HOST or host == "oreilly.com" or host.endswith(".oreilly.com")
 
 # Files of the original EPUB that are not copied as assets: chapters are fetched
 # through the chapters API and the package/NCX files are regenerated on write.
@@ -222,9 +223,17 @@ class OreillyClient:
 
     def __init__(self, session: Session):
         self.session = session
-        cookies = httpx.Cookies()
-        for name, value in session.cookies.items():
-            cookies.set(name, value, domain=COOKIE_DOMAIN)
+        cookie_header = session.get_cookie_header()
+
+        def cookies_for_oreilly_only(request: httpx.Request) -> None:
+            # Runs for every request, redirect hops included. It replaces any
+            # header built from Set-Cookie responses, so the session is always
+            # the cookies.json one, as a single header.
+            if _sends_cookies(request.url.host):
+                request.headers["Cookie"] = cookie_header
+            else:
+                request.headers.pop("Cookie", None)
+
         self.http = httpx.Client(
             headers={
                 "User-Agent": (
@@ -236,17 +245,17 @@ class OreillyClient:
                 "Accept-Language": "en-US,en;q=0.9",
                 "Referer": SITE,
             },
-            cookies=cookies,
+            event_hooks={"request": [cookies_for_oreilly_only]},
             follow_redirects=True,
             timeout=30.0,
         )
 
     def get_book(self, book_id: str) -> Book:
         """Fetch a complete book: metadata, nested TOC, chapters and assets."""
-        console.print(f"[bold]Fetching book:[/] {book_id}")
+        console.print(f"[bold]Fetching book:[/] {escape(book_id)}")
 
         metadata = self._get_metadata(book_id)
-        console.print(f"[green]Found:[/] {metadata}")
+        console.print(f"[green]Found:[/] {escape(str(metadata))}")
 
         chapters = self._get_chapters(book_id)
         toc = self._get_toc(book_id, chapters)
@@ -506,13 +515,13 @@ class OreillyClient:
             task = progress.add_task("Assets", total=len(wanted))
             for file in wanted:
                 name = file.get("filename") or file["full_path"]
-                progress.update(task, description=f"Assets: {name[:40]}")
+                progress.update(task, description=f"Assets: {escape(name[:40])}")
                 human_delay(100, 300)
                 try:
                     response = self._get(file["url"])
                     response.raise_for_status()
                 except httpx.HTTPError as e:
-                    console.print(f"[yellow]Warning: failed to fetch {name}: {e}[/]")
+                    console.print(f"[yellow]Warning: failed to fetch {escape(name)}: {escape(str(e))}[/]")
                     progress.advance(task)
                     continue
 
@@ -547,7 +556,7 @@ class OreillyClient:
         with self._progress() as progress:
             task = progress.add_task("Chapters", total=len(chapters))
             for i, chapter in enumerate(chapters):
-                progress.update(task, description=f"Chapters: {chapter.title[:40]}")
+                progress.update(task, description=f"Chapters: {escape(chapter.title[:40])}")
                 # Vary the delay more for early chapters, then settle into a rhythm.
                 human_delay(1000, 2500) if i < 3 else human_delay(500, 1500)
 
@@ -555,7 +564,10 @@ class OreillyClient:
                     response = self._get(chapter.content_url)
                     response.raise_for_status()
                 except httpx.HTTPError as e:
-                    console.print(f"[yellow]Warning: failed to fetch {chapter.title}: {e}[/]")
+                    console.print(
+                        f"[yellow]Warning: failed to fetch {escape(chapter.title)}: "
+                        f"{escape(str(e))}[/]"
+                    )
                     human_delay(2000, 4000)
                     progress.advance(task)
                     continue
@@ -578,7 +590,7 @@ class OreillyClient:
                 response = self._get(f"{API_BASE}epubs/{_book_urn(book_id)}/files/{path}")
                 response.raise_for_status()
             except httpx.HTTPError as e:
-                console.print(f"[yellow]Warning: failed to fetch {path}: {e}[/]")
+                console.print(f"[yellow]Warning: failed to fetch {escape(path)}: {escape(str(e))}[/]")
                 continue
             media_type = response.headers.get("content-type", "application/octet-stream")
             assets.append(Asset(path=path, media_type=media_type.split(";")[0], data=response.content))
@@ -741,7 +753,7 @@ class OreillyClient:
                 response = self._get(metadata.cover_url)
                 response.raise_for_status()
             except httpx.HTTPError as e:
-                console.print(f"[yellow]Warning: failed to fetch cover: {e}[/]")
+                console.print(f"[yellow]Warning: failed to fetch cover: {escape(str(e))}[/]")
                 return None
             media_type = response.headers.get("content-type", "image/jpeg").split(";")[0]
             ext = {"image/png": "png", "image/gif": "gif", "image/webp": "webp"}.get(media_type, "jpg")
