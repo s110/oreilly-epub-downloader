@@ -20,8 +20,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import BinaryIO
 
-from .hls import SAMPLES_PER_FRAME
-from .models import AudioTrack
+from .models import SAMPLES_PER_FRAME, AudioTrack
 
 MOVIE_TIMESCALE = 1000
 CHUNK_SAMPLES = 64  # AAC frames per chunk: about 1.5 s at 44.1 kHz
@@ -78,8 +77,10 @@ def _utf8(text: str, limit: int) -> bytes:
 
 
 def _language(code: str) -> int:
-    code = LANGUAGES.get(code.lower()[:2], "und") if len(code) < 3 else code.lower()[:3]
-    if not code.isascii() or not code.isalpha():
+    """Packed ISO 639-2/T code of a language tag ("es", "en-US", "spa", "pt_BR")."""
+    primary = code.strip().lower().replace("_", "-").split("-")[0]
+    code = LANGUAGES.get(primary, "und") if len(primary) == 2 else primary
+    if len(code) != 3 or not code.isascii() or not code.isalpha():
         code = "und"
     return sum((ord(c) - 0x60) << (10 - 5 * i) for i, c in enumerate(code))
 
@@ -211,7 +212,9 @@ def _audio_trak(track: AudioTrack, sizes: array, audio_start: int, wide: bool,
         b"mp4a",
         b"\0" * 6, struct.pack(">H", 1), b"\0" * 8,
         struct.pack(">HHHH", track.channels, 16, 0, 0),
-        struct.pack(">I", track.sample_rate << 16),
+        # 16.16 fixed point; rates that do not fit are written as 0, as ffmpeg
+        # does: players read the real rate from the esds and mdhd.
+        struct.pack(">I", track.sample_rate << 16 if track.sample_rate < 0x10000 else 0),
         _esds(track.audio_specific_config, avg_bitrate, max(sizes, default=0)),
     )
     offsets = []

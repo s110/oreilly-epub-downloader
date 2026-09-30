@@ -13,7 +13,6 @@ from urllib.parse import urljoin
 
 # MPEG-4 sampling frequency index -> Hz (ISO/IEC 14496-3, 1.6.3.4).
 SAMPLE_RATES = [96000, 88200, 64000, 48000, 44100, 32000, 24000, 22050, 16000, 12000, 11025, 8000, 7350]
-SAMPLES_PER_FRAME = 1024
 TS_PACKET = 188
 # PMT stream types: 0x0F is AAC with ADTS framing; 0x11 (LATM) is not supported.
 STREAM_TYPE_ADTS = 0x0F

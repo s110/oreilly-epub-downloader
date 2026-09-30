@@ -37,6 +37,14 @@ if SITE == "/":
     SITE = "https://learning.oreilly.com/"
 API_BASE = f"{SITE}api/v2/"
 OREILLY_HOSTS = {"learning.oreilly.com", "www.oreilly.com", "oreilly.com", urlsplit(SITE).netloc}
+# Domain the session cookies are sent to: oreilly.com and its subdomains, or
+# the host of OREILLY_DL_BASE_URL. Never any other host, even when a URL from
+# the API (a cover, a redirect) points elsewhere.
+COOKIE_DOMAIN = (
+    ".oreilly.com"
+    if urlsplit(SITE).hostname in ("oreilly.com", "learning.oreilly.com", "www.oreilly.com")
+    else urlsplit(SITE).hostname or ""
+)
 
 # Files of the original EPUB that are not copied as assets: chapters are fetched
 # through the chapters API and the package/NCX files are regenerated on write.
@@ -214,6 +222,9 @@ class OreillyClient:
 
     def __init__(self, session: Session):
         self.session = session
+        cookies = httpx.Cookies()
+        for name, value in session.cookies.items():
+            cookies.set(name, value, domain=COOKIE_DOMAIN)
         self.http = httpx.Client(
             headers={
                 "User-Agent": (
@@ -223,9 +234,9 @@ class OreillyClient:
                 ),
                 "Accept": "application/json, text/html, */*",
                 "Accept-Language": "en-US,en;q=0.9",
-                "Cookie": session.get_cookie_header(),
                 "Referer": SITE,
             },
+            cookies=cookies,
             follow_redirects=True,
             timeout=30.0,
         )

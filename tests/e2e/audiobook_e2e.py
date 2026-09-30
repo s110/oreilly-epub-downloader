@@ -11,7 +11,7 @@ Runs:
 1. `oreilly-dl <id>`: one M4B, playlist from the API;
 2. the same with the playlist API answering 404: the client reads the player
    page instead, and the M4B must be byte-identical to run 1;
-3. `--feed-url`: one M4A per chapter, playlist, cover and podcast feed;
+3. `--feed-url` with a /library/view/ URL: one M4A per chapter, playlist, cover and podcast feed;
 4. an expired cookie: 401, nothing written.
 
 Artifacts: artifacts/e2e/fictitious_audiobook.m4b and .json. The M4B has no
@@ -35,6 +35,9 @@ AUDIO_URL = f"https://learning.oreilly.com/videos/suenan-los-grafos/{AUDIO_ID}/{
 TITLE = "¿Suenan los Grafos? Relatos para Ñandúes"
 M4B_NAME = "¿Suenan los Grafos Relatos para Ñandúes.m4b"
 FOLDER = "¿Suenan los Grafos Relatos para Ñandúes"
+# The split run uses the /library/view/ form with a lowercase suffix: the id
+# must still be read as an audiobook id, in upper case.
+LIBRARY_URL = f"https://learning.oreilly.com/library/view/suenan-los-grafos/{AUDIO_ID.lower()}/"
 FEED_URL = "https://podcast.example/mis audios"
 FEED_BASE = "https://podcast.example/mis%20audios/"
 SAMPLE_RATE = 22050
@@ -392,6 +395,7 @@ def run(checks, run_cli, e2e: Path, artifacts: Path, root: Path) -> dict:
     valid = e2e / "fixtures/session-valid.json"
     m4b_artifact = artifacts / f"{SCENARIO}.m4b"
     digests = []
+    fallback = None
     with tempfile.TemporaryDirectory() as tmp:
         tmp = Path(tmp)
         for attempt, api in ((1, True), (2, False)):
@@ -410,20 +414,28 @@ def run(checks, run_cli, e2e: Path, artifacts: Path, root: Path) -> dict:
                     shutil.copyfile(out / M4B_NAME, m4b_artifact)
                     check_m4b(checks, out / M4B_NAME, text, server)
                 else:
-                    fallback = server.statuses.get(f"/api/v1/videoplaylists/{AUDIO_ID}/") == [404] and server.statuses.get(f"/videos/-/{AUDIO_ID}/") == [200]
+                    fallback = {
+                        "exit": proc.returncode,
+                        "files": produced,
+                        "api_404_then_page": server.statuses.get(f"/api/v1/videoplaylists/{AUDIO_ID}/") == [404]
+                        and server.statuses.get(f"/videos/-/{AUDIO_ID}/") == [200],
+                    }
             if produced == [M4B_NAME]:
                 digests.append(hashlib.sha256((out / M4B_NAME).read_bytes()).hexdigest())
-        if len(digests) == 2:
+        if fallback is not None:
+            # Recorded whenever run 2 ran: a fallback run that writes nothing fails here.
+            same = len(digests) == 2 and digests[0] == digests[1]
             checks.add(
                 "player_page_fallback_gives_identical_m4b",
-                fallback and digests[0] == digests[1],
-                f"api_404_then_page={fallback} same_sha256={digests[0] == digests[1]}",
+                fallback["exit"] == 0 and fallback["files"] == [M4B_NAME]
+                and fallback["api_404_then_page"] and same,
+                json.dumps({**fallback, "same_sha256": same}, ensure_ascii=False),
             )
 
         out = tmp / "split"
         out.mkdir()
         with FakeOreilly() as server:
-            proc = run_cli(server.base_url, valid, out, AUDIO_ID, ("--feed-url", FEED_URL))
+            proc = run_cli(server.base_url, valid, out, LIBRARY_URL, ("--feed-url", FEED_URL))
         checks.add("split_cli_exit_zero", proc.returncode == 0, f"exit={proc.returncode}")
         folder = out / FOLDER
         if folder.is_dir():

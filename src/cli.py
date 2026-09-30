@@ -22,17 +22,21 @@ console = Console()
 
 def extract_book_id(book_input: str) -> str:
     """Extract book ID from URL or direct input."""
+    # Audiobook ids (ISBN + "AU") keep their suffix, in upper case as the API
+    # expects, wherever they appear: /library/view/, /videos/, a URN or alone.
+    match = re.search(r"(?<![0-9A-Za-z])(\d{9,13}X?AU)(?![0-9A-Za-z])", book_input, re.I)
+    if match:
+        return match.group(1).upper()
+
     url_pattern = r"learning\.oreilly\.com/library/view/[^/]+/(\d+)"
     match = re.search(url_pattern, book_input)
     if match:
         return match.group(1)
 
-    # Audiobooks: .../videos/<slug>/9781633437166AU/[<clip>/], urn:orm:audiobook:<id>
+    # Other audiobook URLs: .../videos/<slug>/<id>/[<clip>/], urn:orm:audiobook:<id>
     match = re.search(r"/videos/[^/]+/([^/?#]+)|urn:orm:audiobook:([^:/?#]+)", book_input)
     if match:
         return match.group(1) or match.group(2)
-    if is_audiobook_id(book_input.strip()):
-        return book_input.strip()
 
     if re.match(r"^\d+$", book_input):
         return book_input
@@ -54,14 +58,35 @@ def resolve_output(output: Path | None, book: Book) -> Path:
     return output if output.suffix == ".epub" else output.with_suffix(".epub")
 
 
+AUDIO_SUFFIXES = (".m4b", ".m4a")
+
+
+def check_audio_output(output: Path | None, split: bool) -> None:
+    """Refuse, before the download, an -o the audiobook cannot be written to."""
+    if output is None or output.is_dir():
+        return
+    if split and output.exists():
+        raise click.BadParameter(
+            f"{output} is a file; --split needs a folder", param_hint="-o/--output"
+        )
+
+
 def resolve_audio_output(output: Path | None, book: Audiobook, split: bool) -> Path:
-    """Where to write the audiobook: an .m4b file, or a folder with --split."""
+    """Where to write the audiobook, with the same rules as resolve_output.
+
+    An existing directory gets <title>.m4b (or the <title>/ folder with
+    --split) inside it. Any other path is the target itself: the file, whose
+    suffix becomes .m4b unless it is .m4b or .m4a, or with --split the folder.
+    Default: ./downloads/<title>.m4b or ./downloads/<title>/.
+    """
     name = sanitize_filename(book.metadata.title) or book.metadata.id
     if output is None:
-        output = Path("downloads")
-    elif not output.is_dir() and (split or output.suffix.lower() in (".m4b", ".m4a")):
-        return output.with_suffix(".m4b") if not split else output
-    return output / name if split else output / f"{name}.m4b"
+        return Path("downloads") / (name if split else f"{name}.m4b")
+    if output.is_dir():
+        return output / name if split else output / f"{name}.m4b"
+    if split or output.suffix.lower() in AUDIO_SUFFIXES:
+        return output
+    return output.with_suffix(".m4b")
 
 
 def _duration(seconds: float) -> str:
@@ -75,11 +100,11 @@ def print_audio_summary(book: Audiobook, output_path: Path, files: list[Path]) -
     table = Table(box=box.SIMPLE, show_header=False, pad_edge=False)
     table.add_column(style="dim")
     table.add_column()
-    table.add_row("Title", m.title)
-    table.add_row("Authors", ", ".join(m.authors) or "[yellow]unknown[/]")
-    table.add_row("Narrators", ", ".join(m.narrators) or "[dim]not listed[/]")
-    table.add_row("Publisher", m.publisher or "[yellow]unknown[/]")
-    table.add_row("Published", m.published or "[yellow]unknown[/]")
+    table.add_row("Title", escape(m.title))
+    table.add_row("Authors", escape(", ".join(m.authors)) or "[yellow]unknown[/]")
+    table.add_row("Narrators", escape(", ".join(m.narrators)) or "[dim]not listed[/]")
+    table.add_row("Publisher", escape(m.publisher) or "[yellow]unknown[/]")
+    table.add_row("Published", escape(m.published) or "[yellow]unknown[/]")
     table.add_row("Cover", "yes" if book.cover else "[yellow]none[/]")
     table.add_row("Chapters", str(len(book.chapters)))
     table.add_row("Length", _duration(book.seconds))
@@ -88,7 +113,7 @@ def print_audio_summary(book: Audiobook, output_path: Path, files: list[Path]) -
     table.add_row("Size", f"{size / 1_000_000:.1f} MB in {len(files)} files" if len(files) > 1
                   else f"{size / 1_000_000:.1f} MB")
     console.print(table)
-    console.print(f"[bold green]Done:[/] {output_path}")
+    console.print(f"[bold green]Done:[/] {escape(str(output_path))}")
 
 
 def print_summary(book: Book, output_path: Path) -> None:
@@ -155,8 +180,11 @@ def main(
         raise click.BadParameter("must start with http:// or https://", param_hint="--feed-url")
     if (split or feed_url) and not audiobook:
         raise click.UsageError("--split and --feed-url only apply to audiobooks")
+    split = split or bool(feed_url)
+    if audiobook:
+        check_audio_output(output, split)
     kind = "audiobook" if audiobook else "book"
-    console.print(f"[bold]Downloading {kind}:[/] {book_id}")
+    console.print(f"[bold]Downloading {kind}:[/] {escape(book_id)}")
 
     try:
         session = load_cookies(cookies)
@@ -165,7 +193,6 @@ def main(
             with OreillyClient(session) as client, AudiobookFetcher(client) as fetcher:
                 audio = fetcher.get_audiobook(book_id)
             with audio.track.file:
-                split = split or bool(feed_url)
                 output_path = resolve_audio_output(output, audio, split)
                 if split:
                     files = write_chapters(audio, output_path, feed_url)
@@ -182,7 +209,7 @@ def main(
         print_summary(book_data, output_path)
 
     except AuthError as e:
-        console.print(f"\n[bold red]Error:[/] {e}")
+        console.print(f"\n[bold red]Error:[/] {escape(str(e))}")
         console.print(
             "Log in to learning.oreilly.com in your browser, export fresh cookies "
             f"to {escape(str(cookies))} (see the README) and run the command again."
@@ -192,7 +219,7 @@ def main(
         console.print("\n[yellow]Cancelled[/]")
         sys.exit(130)
     except Exception as e:
-        console.print(f"\n[bold red]Error:[/] {e}")
+        console.print(f"\n[bold red]Error:[/] {escape(str(e))}")
         sys.exit(1)
 
 

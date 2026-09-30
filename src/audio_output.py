@@ -103,7 +103,7 @@ def write_chapters(book: Audiobook, directory: Path, feed_url: str | None = None
     rate = book.track.sample_rate
     lines = ["#EXTM3U"]
     for chapter, name in zip(book.chapters, names, strict=True):
-        seconds = round(chapter.samples * 1024 / rate) if rate else -1
+        seconds = round(chapter.seconds(rate)) if rate else -1
         lines += [f"#EXTINF:{seconds},{chapter.title}", name]
     with _atomic(playlist) as out:
         out.write(("\n".join(lines) + "\n").encode("utf-8"))
@@ -166,6 +166,6 @@ def podcast_feed(
         add(item, "guid", chapter.ourn or f"{m.id}:{chapter.reference_id}", isPermaLink="false")
         add(item, "pubDate", format_datetime(start + timedelta(minutes=i - 1)))
         if rate:
-            add(item, f"{it}duration", str(round(chapter.samples * 1024 / rate)))
+            add(item, f"{it}duration", str(round(chapter.seconds(rate))))
     ET.indent(rss)
     return ET.tostring(rss, encoding="utf-8", xml_declaration=True) + b"\n"

@@ -16,6 +16,7 @@ which never carries the O'Reilly cookies.
 
 import base64
 import json
+import math
 import os
 import re
 import tempfile
@@ -66,6 +67,30 @@ def _clip_id(url_or_ref: str) -> str:
     return PurePosixPath(urlsplit(url_or_ref).path).name or url_or_ref
 
 
+def _expiry(value: Any) -> float:
+    """Epoch seconds of the KS expiry: an ISO date (naive = UTC) or an epoch.
+
+    Anything else counts as one hour from now, so an unexpected format only
+    means the session is renewed earlier than needed.
+    """
+    seconds: float | None = None
+    if isinstance(value, int | float) and not isinstance(value, bool):
+        seconds = float(value)
+    elif isinstance(value, str):
+        try:
+            seconds = float(value)
+        except ValueError:
+            try:
+                when = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+            except ValueError:
+                pass
+            else:
+                seconds = (when if when.tzinfo else when.replace(tzinfo=UTC)).timestamp()
+    if seconds is None or not math.isfinite(seconds):
+        return time.time() + 3600
+    return seconds / 1000 if seconds > 1e11 else seconds  # milliseconds
+
+
 def _short(url: str) -> str:
     """File name of a URL, for messages: never the query or a token in the path."""
     return PurePosixPath(urlsplit(url).path).name or urlsplit(url).netloc
@@ -103,7 +128,7 @@ class AudiobookFetcher:
     # --------------------------------------------------------------- the book
 
     def get_audiobook(self, work_id: str) -> Audiobook:
-        console.print(f"[bold]Fetching audiobook:[/] {work_id}")
+        console.print(f"[bold]Fetching audiobook:[/] {escape(work_id)}")
         playlist = self._get_playlist(work_id)
         content_format = playlist.get("content_format") or "audiobook"
         if content_format != "audiobook":
@@ -112,7 +137,7 @@ class AudiobookFetcher:
                 "can be downloaded as audio"
             )
         metadata = self._metadata(work_id, playlist)
-        console.print(f"[green]Found:[/] {metadata}")
+        console.print(f"[green]Found:[/] {escape(str(metadata))}")
 
         refs = [_clip_id(r) for r in playlist.get("spine") or playlist.get("video_clips") or []]
         if not refs:
@@ -133,7 +158,7 @@ class AudiobookFetcher:
                         ourn=clip.get("ourn") or "",
                         first_sample=track.samples,
                     )
-                    progress.update(task, description=f"Audio: {chapter.title[:40]}")
+                    progress.update(task, description=f"Audio: {escape(chapter.title[:40])}")
                     entry = clip.get("kaltura_entry_id")
                     if not entry:
                         raise DownloadError(f"{chapter.title}: the clip has no Kaltura entry")
@@ -223,7 +248,8 @@ class AudiobookFetcher:
             return None
         media_type = response.headers.get("content-type", "").split(";")[0].strip()
         if media_type not in COVER_TYPES:
-            console.print(f"[yellow]Warning: cover is {media_type or 'not an image'}, not added[/]")
+            kind = escape(media_type) if media_type else "not an image"
+            console.print(f"[yellow]Warning: cover is {kind}, not added[/]")
             return None
         ext = "png" if media_type == "image/png" else "jpg"
         return Asset(path=f"cover.{ext}", media_type=media_type, data=response.content)
@@ -243,13 +269,7 @@ class AudiobookFetcher:
             self._ks = data.get("session") or ""
             if not self._ks:
                 raise DownloadError("Kaltura session: no token")
-            try:
-                expiry = datetime.fromisoformat(data.get("expiry") or "")
-                if expiry.tzinfo is None:
-                    expiry = expiry.replace(tzinfo=UTC)
-                self._ks_expires = expiry.timestamp()
-            except ValueError:
-                self._ks_expires = time.time() + 3600
+            self._ks_expires = _expiry(data.get("expiry"))
         return self._ks
 
     def _flavors(self, entry: str) -> str:

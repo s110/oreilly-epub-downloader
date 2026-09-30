@@ -54,7 +54,10 @@ Books are saved to `./downloads/` by default.
 ### 3. Download audiobooks
 
 Audiobook IDs end in `AU`. You can also paste the player URL
-(`https://learning.oreilly.com/videos/<slug>/<id>/...`).
+(`https://learning.oreilly.com/videos/<slug>/<id>/...`) or a
+`/library/view/<slug>/<id>/` URL. `-o` works as for books: an existing folder
+gets `<title>.m4b` (or the `<title>/` folder with `--split`) inside it, and any
+other path is the file (`.m4b` or `.m4a`) or, with `--split`, the folder.
 
 ```bash
 # One .m4b with chapters, cover and tags (Apple Books, BookPlayer, VLC...)

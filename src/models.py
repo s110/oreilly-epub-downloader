@@ -6,6 +6,9 @@ from dataclasses import dataclass, field
 from pathlib import PurePosixPath
 from typing import BinaryIO
 
+# AAC frames (MP4 samples) always hold 1024 PCM samples per channel here.
+SAMPLES_PER_FRAME = 1024
+
 
 def sanitize_filename(name: str) -> str:
     """Create a safe filename from a title."""
@@ -113,6 +116,9 @@ class AudioChapter:
     first_sample: int = 0  # index of its first AAC frame in the book's track
     samples: int = 0  # number of AAC frames
 
+    def seconds(self, sample_rate: int) -> float:
+        return self.samples * SAMPLES_PER_FRAME / sample_rate if sample_rate else 0.0
+
 
 @dataclass
 class AudioTrack:
@@ -144,4 +150,5 @@ class Audiobook:
 
     @property
     def seconds(self) -> float:
-        return self.track.samples * 1024 / self.track.sample_rate if self.track.sample_rate else 0.0
+        rate = self.track.sample_rate
+        return self.track.samples * SAMPLES_PER_FRAME / rate if rate else 0.0
