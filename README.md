@@ -51,6 +51,37 @@ Example output:
 
 Books are saved to `./downloads/` by default.
 
+### 3. Download audiobooks
+
+Audiobook IDs end in `AU`. You can also paste the player URL
+(`https://learning.oreilly.com/videos/<slug>/<id>/...`) or a
+`/library/view/<slug>/<id>/` URL. `-o` works as for books: an existing folder
+gets `<title>.m4b` (or the `<title>/` folder with `--split`) inside it, and any
+other path is the file (`.m4b` or `.m4a`) or, with `--split`, the folder.
+
+```bash
+# One .m4b with chapters, cover and tags (Apple Books, BookPlayer, VLC...)
+oreilly-dl 9781633437166AU -c cookies.json
+
+# One .m4a per chapter in a folder, with an .m3u8 playlist and the cover
+oreilly-dl 9781633437166AU -c cookies.json --split
+
+# Per-chapter files plus a podcast feed (feed.xml). Put the folder on a web
+# server at that URL and subscribe to <URL>/feed.xml in your podcast app.
+oreilly-dl 9781633437166AU -c cookies.json --feed-url https://example.org/llm/
+```
+
+The `.m4b` carries the chapters twice (a QuickTime chapter track for Apple
+players and a Nero `chpl` list for the others), the authors, the narrator (as
+composer), the description, the cover and the media kind "Audiobook". The
+audio is copied bit for bit from O'Reilly's stream (AAC): nothing is
+re-encoded and ffmpeg is not needed. If one part of the audio cannot be
+downloaded after the retries, the command stops and writes nothing, so run
+it again.
+
+Only audiobooks are supported, not video courses. Protected (DRM) or
+encrypted streams stop with an error.
+
 ## Finding Book IDs
 
 The book ID is the number in the O'Reilly URL:

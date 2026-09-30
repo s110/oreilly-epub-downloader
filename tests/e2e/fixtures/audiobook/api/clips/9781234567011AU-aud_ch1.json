@@ -1,0 +1,16 @@
+{
+  "id": "clip-0",
+  "reference_id": "9781234567011AU-aud_ch1",
+  "ourn": "urn:orm:audiobook:9781234567011AU:audio-clip:aud_ch1",
+  "kaltura_entry_id": "1_capit001",
+  "magpie_clip_id": null,
+  "video_playlist": "{BASE}api/v1/videoplaylists/9781234567011AU/",
+  "work_id": "9781234567011AU",
+  "transcriptions": [],
+  "work_ourn": "urn:orm:audiobook:9781234567011AU",
+  "reference_id_url": "/api/v1/videoclips/9781234567011AU-aud_ch1/",
+  "content_format": "video-clip",
+  "duration": 5,
+  "description": "",
+  "title": "Capítulo 1. Cómo suena un árbol"
+}

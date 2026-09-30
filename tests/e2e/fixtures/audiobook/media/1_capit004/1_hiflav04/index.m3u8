@@ -1,0 +1,7 @@
+#EXTM3U
+#EXT-X-VERSION:3
+#EXT-X-TARGETDURATION:2
+#EXT-X-MEDIA-SEQUENCE:1
+#EXTINF:1.546589,
+{BASE}cdn/1_capit004/1_hiflav04/seg-1.ts?Policy=e2e-signed&Signature=e2e
+#EXT-X-ENDLIST

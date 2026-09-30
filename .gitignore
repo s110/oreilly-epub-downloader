@@ -34,6 +34,8 @@ wheels/
 
 # Output
 *.epub
+*.m4b
+*.m4a
 downloads/
 
 # Cookies (contain session tokens)
