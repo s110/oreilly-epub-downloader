@@ -1,0 +1,35 @@
+{
+  "1_capit001": {
+    "1_hiflav01": {
+      "segments": 3,
+      "frames": 113,
+      "sha256": "18560a183354c61a8a8be2097b7a09ff34c56d249875e78b7c13292c670b3953"
+    }
+  },
+  "1_capit002": {
+    "1_loflav02": {
+      "segments": 4,
+      "frames": 152,
+      "sha256": "fe73b8a5ad0c0a4db3e9793e5edd9c77cec90bdba4392ae555fda37cb138d0fe"
+    },
+    "1_hiflav02": {
+      "segments": 4,
+      "frames": 152,
+      "sha256": "54082cea595185ee23b51bc53a3765f4b137eedf14c9b631412e37247945074c"
+    }
+  },
+  "1_capit003": {
+    "1_hiflav03": {
+      "segments": 4,
+      "frames": 133,
+      "sha256": "4b40fd1cd5875b6db81cc4b62610d9f66fc61d630067c87e9e08c11f2fe664aa"
+    }
+  },
+  "1_capit004": {
+    "1_hiflav04": {
+      "segments": 1,
+      "frames": 34,
+      "sha256": "71f93ae53bc4f3db36994e16dc14b2652ba3dfc019081cddb0c7d81145b81020"
+    }
+  }
+}

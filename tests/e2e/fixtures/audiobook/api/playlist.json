@@ -1,0 +1,57 @@
+{
+  "id": "00000000-0000-4000-8000-000000000011",
+  "identifier": "9781234567011AU",
+  "ourn": "urn:orm:audiobook:9781234567011AU",
+  "hidden": false,
+  "video_clips": [
+    "{BASE}api/v1/videoclips/9781234567011AU-aud_ch1/",
+    "{BASE}api/v1/videoclips/9781234567011AU-aud_ch2/",
+    "{BASE}api/v1/videoclips/9781234567011AU-aud_ch3/",
+    "{BASE}api/v1/videoclips/9781234567011AU-aud_appa/"
+  ],
+  "isbn": null,
+  "cover": "/covers/9781234567011AU/",
+  "toc_url": "{BASE}api/v1/videotocs/9781234567011AU/",
+  "descriptions": {
+    "text_html": "<span><p>Un audiolibro <b>ficticio</b> sobre grafos.</p><p>Narrado con <i>tonos</i> puros.</p></span>"
+  },
+  "work_format": "video",
+  "language": "es",
+  "content_format": "audiobook",
+  "title": "¿Suenan los Grafos?\n  Relatos para Ñandúes",
+  "publication_date": "2025-11-02",
+  "total_running_time_secs": "20",
+  "tags": [
+    "course"
+  ],
+  "spine": [
+    "9781234567011AU-aud_ch1",
+    "9781234567011AU-aud_ch2",
+    "9781234567011AU-aud_ch3",
+    "9781234567011AU-aud_appa"
+  ],
+  "topics": [
+    {
+      "id": "t1",
+      "name": "Algoritmos"
+    }
+  ],
+  "publisher": {
+    "name": "Editorial Ficticia",
+    "uuid": "p1"
+  },
+  "contributors": {
+    "authors": [
+      "Ana Ñúñez",
+      "Zoë Østergaard"
+    ],
+    "curators": [],
+    "editors": [],
+    "illustrators": [],
+    "narrators": [
+      "Íñigo Peña"
+    ],
+    "translators": [],
+    "presenters": []
+  }
+}

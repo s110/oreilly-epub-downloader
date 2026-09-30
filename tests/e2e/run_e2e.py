@@ -32,6 +32,7 @@ from bs4 import BeautifulSoup
 from lxml import etree
 
 sys.path.insert(0, str(Path(__file__).parent))
+import audiobook_e2e  # noqa: E402
 from fake_oreilly import BOOK_ID, FIXTURES, FakeOreilly  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -155,12 +156,19 @@ def fixture(rel: str) -> bytes:
     return (FIXTURES / rel).read_bytes()
 
 
-def run_cli(base_url: str, cookies: Path, out_dir: Path) -> subprocess.CompletedProcess:
+def run_cli(
+    base_url: str,
+    cookies: Path,
+    out_dir: Path,
+    target: str = BOOK_URL,
+    extra: tuple[str, ...] = (),
+) -> subprocess.CompletedProcess:
     # Any request that is not for the fake server goes to a dead proxy and fails.
     dead_proxy = "http://127.0.0.1:9"
     env = dict(
         os.environ,
         OREILLY_DL_BASE_URL=base_url,
+        OREILLY_DL_KALTURA_URL=f"{base_url}kaltura/",
         HTTP_PROXY=dead_proxy,
         HTTPS_PROXY=dead_proxy,
         ALL_PROXY=dead_proxy,
@@ -172,7 +180,7 @@ def run_cli(base_url: str, cookies: Path, out_dir: Path) -> subprocess.Completed
     script = Path(sys.executable).with_name("oreilly-dl")
     cli = [str(script)] if script.exists() else [sys.executable, "-m", "src.cli"]
     return subprocess.run(
-        [*cli, BOOK_URL, "-c", str(cookies), "-o", str(out_dir)],
+        [*cli, target, "-c", str(cookies), "-o", str(out_dir), *extra],
         cwd=ROOT,
         env=env,
         capture_output=True,
@@ -750,7 +758,38 @@ def main() -> int:
         )
     print(f"\n{counts} -> {report['result'].upper()}  [{out_json.relative_to(ROOT)}]")
     print(f"normalized sha256: {epub_hash}  epubcheck: {report['epubcheck']['result']}")
-    return 0 if ok else 1
+
+    audio_ok = run_audiobook()
+    return 0 if ok and audio_ok else 1
+
+
+def run_audiobook() -> bool:
+    """Scenario 2 (audiobook_e2e.py), with its own report."""
+    checks = Checks()
+    details = audiobook_e2e.run(checks, run_cli, E2E, ARTIFACTS, ROOT)
+    counts = {
+        s: sum(r["status"] == s for r in checks.results)
+        for s in ("pass", "known_failure", "fail", "unexpected_pass")
+    }
+    ok = counts["fail"] == 0 and counts["unexpected_pass"] == 0
+    report = {
+        "scenario": details.pop("scenario"),
+        "result": "pass" if ok else "fail",
+        "summary": counts,
+        **details,
+        "checks": checks.results,
+    }
+    out_json = ARTIFACTS / f"{report['scenario']}.json"
+    out_json.write_text(json.dumps(report, indent=2, ensure_ascii=False) + "\n")
+    print()
+    for r in checks.results:
+        print(
+            f"{r['status']:>16}  {r['name']}"
+            + (f"  ({r['detail']})" if r["status"] != "pass" else "")
+        )
+    print(f"\n{counts} -> {report['result'].upper()}  [{out_json.relative_to(ROOT)}]")
+    print(f"m4b sha256: {report['m4b']['sha256']}  pyav: {report['pyav']['result']}")
+    return ok
 
 
 if __name__ == "__main__":

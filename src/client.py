@@ -259,18 +259,30 @@ class OreillyClient:
     # ------------------------------------------------------------------ HTTP
 
     def _get(self, url: str, params: dict | None = None) -> httpx.Response:
-        """GET with bounded retries on transient failures (see MAX_ATTEMPTS).
+        return self._request("GET", url, params=params)
+
+    def _request(
+        self,
+        method: str,
+        url: str,
+        params: dict | None = None,
+        json: Any = None,
+        http: httpx.Client | None = None,
+    ) -> httpx.Response:
+        """Request with bounded retries on transient failures (see MAX_ATTEMPTS).
 
         Returns the last response without raising for its status, so callers
         handle a 404 or an exhausted 5xx as before; a transport error that is
         still failing on the last attempt is raised. A 401 from O'Reilly raises
         AuthError at once, wherever it happens, instead of producing a book
-        with holes.
+        with holes. `http` selects another client (one without the O'Reilly
+        cookies, for third-party hosts).
         """
+        http = http or self.http
         for attempt in range(1, MAX_ATTEMPTS + 1):
             last = attempt == MAX_ATTEMPTS
             try:
-                response = self.http.get(url, params=params)
+                response = http.request(method, url, params=params, json=json)
             except RETRY_ERRORS as e:
                 if last:
                     raise

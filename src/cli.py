@@ -10,10 +10,12 @@ from rich.console import Console
 from rich.markup import escape
 from rich.table import Table
 
+from .audio_output import FEED_NAME, write_chapters, write_m4b
+from .audiobook import AudiobookFetcher, is_audiobook_id
 from .client import AuthError, OreillyClient
 from .cookie_auth import load_cookies
 from .epub import create_epub
-from .models import Book
+from .models import Audiobook, Book, sanitize_filename
 
 console = Console()
 
@@ -25,6 +27,13 @@ def extract_book_id(book_input: str) -> str:
     if match:
         return match.group(1)
 
+    # Audiobooks: .../videos/<slug>/9781633437166AU/[<clip>/], urn:orm:audiobook:<id>
+    match = re.search(r"/videos/[^/]+/([^/?#]+)|urn:orm:audiobook:([^:/?#]+)", book_input)
+    if match:
+        return match.group(1) or match.group(2)
+    if is_audiobook_id(book_input.strip()):
+        return book_input.strip()
+
     if re.match(r"^\d+$", book_input):
         return book_input
 
@@ -35,13 +44,6 @@ def extract_book_id(book_input: str) -> str:
     return book_input
 
 
-def sanitize_filename(name: str) -> str:
-    """Create a safe filename from book title."""
-    safe = re.sub(r'[<>:"/\\|?*]', "", name)
-    safe = re.sub(r"\s+", " ", safe).strip()
-    return safe[:100]
-
-
 def resolve_output(output: Path | None, book: Book) -> Path:
     """Where to write the EPUB: explicit file, a directory, or ./downloads/<title>.epub."""
     default_name = f"{sanitize_filename(book.metadata.title)}.epub"
@@ -50,6 +52,43 @@ def resolve_output(output: Path | None, book: Book) -> Path:
     if output.is_dir():
         return output / default_name
     return output if output.suffix == ".epub" else output.with_suffix(".epub")
+
+
+def resolve_audio_output(output: Path | None, book: Audiobook, split: bool) -> Path:
+    """Where to write the audiobook: an .m4b file, or a folder with --split."""
+    name = sanitize_filename(book.metadata.title) or book.metadata.id
+    if output is None:
+        output = Path("downloads")
+    elif not output.is_dir() and (split or output.suffix.lower() in (".m4b", ".m4a")):
+        return output.with_suffix(".m4b") if not split else output
+    return output / name if split else output / f"{name}.m4b"
+
+
+def _duration(seconds: float) -> str:
+    total = round(seconds)
+    return f"{total // 3600}:{total // 60 % 60:02d}:{total % 60:02d}"
+
+
+def print_audio_summary(book: Audiobook, output_path: Path, files: list[Path]) -> None:
+    m = book.metadata
+    track = book.track
+    table = Table(box=box.SIMPLE, show_header=False, pad_edge=False)
+    table.add_column(style="dim")
+    table.add_column()
+    table.add_row("Title", m.title)
+    table.add_row("Authors", ", ".join(m.authors) or "[yellow]unknown[/]")
+    table.add_row("Narrators", ", ".join(m.narrators) or "[dim]not listed[/]")
+    table.add_row("Publisher", m.publisher or "[yellow]unknown[/]")
+    table.add_row("Published", m.published or "[yellow]unknown[/]")
+    table.add_row("Cover", "yes" if book.cover else "[yellow]none[/]")
+    table.add_row("Chapters", str(len(book.chapters)))
+    table.add_row("Length", _duration(book.seconds))
+    table.add_row("Audio", f"AAC {track.sample_rate} Hz, {track.channels} ch")
+    size = sum(p.stat().st_size for p in files)
+    table.add_row("Size", f"{size / 1_000_000:.1f} MB in {len(files)} files" if len(files) > 1
+                  else f"{size / 1_000_000:.1f} MB")
+    console.print(table)
+    console.print(f"[bold green]Done:[/] {output_path}")
 
 
 def print_summary(book: Book, output_path: Path) -> None:
@@ -83,23 +122,57 @@ def print_summary(book: Book, output_path: Path) -> None:
     "-o",
     "--output",
     type=click.Path(path_type=Path),
-    help="Output file or directory (defaults to ./downloads/<title>.epub)",
+    help="Output file or directory (defaults to ./downloads/<title>.epub or .m4b)",
 )
-def main(book: str, cookies: Path, output: Path | None) -> None:
-    """Download O'Reilly books as EPUB.
+@click.option(
+    "--split",
+    is_flag=True,
+    help="Audiobooks: one .m4a per chapter in a folder, instead of one .m4b.",
+)
+@click.option(
+    "--feed-url",
+    metavar="URL",
+    help=f"Audiobooks: also write a podcast feed ({FEED_NAME}) for the folder served "
+    "at URL. Implies --split.",
+)
+def main(
+    book: str, cookies: Path, output: Path | None, split: bool, feed_url: str | None
+) -> None:
+    """Download O'Reilly books as EPUB and audiobooks as M4B.
 
-    BOOK can be a book ID or full O'Reilly URL.
+    BOOK can be a book or audiobook ID, or its full O'Reilly URL.
 
     \b
     Examples:
         oreilly-dl 9781098166298 -c cookies.json
         oreilly-dl "https://learning.oreilly.com/library/view/book/9781098166298/" -c cookies.json
+        oreilly-dl 9781633437166AU -c cookies.json
+        oreilly-dl 9781633437166AU -c cookies.json --feed-url https://example.org/llm/
     """
     book_id = extract_book_id(book)
-    console.print(f"[bold]Downloading book:[/] {book_id}")
+    audiobook = is_audiobook_id(book_id) or "/videos/" in book
+    if feed_url and not re.match(r"^https?://", feed_url):
+        raise click.BadParameter("must start with http:// or https://", param_hint="--feed-url")
+    if (split or feed_url) and not audiobook:
+        raise click.UsageError("--split and --feed-url only apply to audiobooks")
+    kind = "audiobook" if audiobook else "book"
+    console.print(f"[bold]Downloading {kind}:[/] {book_id}")
 
     try:
         session = load_cookies(cookies)
+
+        if audiobook:
+            with OreillyClient(session) as client, AudiobookFetcher(client) as fetcher:
+                audio = fetcher.get_audiobook(book_id)
+            with audio.track.file:
+                split = split or bool(feed_url)
+                output_path = resolve_audio_output(output, audio, split)
+                if split:
+                    files = write_chapters(audio, output_path, feed_url)
+                else:
+                    files = [write_m4b(audio, output_path)]
+                print_audio_summary(audio, output_path, files)
+            return
 
         with OreillyClient(session) as client:
             book_data = client.get_book(book_id)

@@ -1,0 +1,13 @@
+#EXTM3U
+#EXT-X-VERSION:3
+#EXT-X-TARGETDURATION:2
+#EXT-X-MEDIA-SEQUENCE:1
+#EXTINF:2.043356,
+{BASE}cdn/1_capit002/1_loflav02/seg-1.ts?Policy=e2e-signed&Signature=e2e
+#EXTINF:1.996922,
+{BASE}cdn/1_capit002/1_loflav02/seg-2.ts?Policy=e2e-signed&Signature=e2e
+#EXTINF:1.996911,
+{BASE}cdn/1_capit002/1_loflav02/seg-3.ts?Policy=e2e-signed&Signature=e2e
+#EXTINF:1.009344,
+{BASE}cdn/1_capit002/1_loflav02/seg-4.ts?Policy=e2e-signed&Signature=e2e
+#EXT-X-ENDLIST
